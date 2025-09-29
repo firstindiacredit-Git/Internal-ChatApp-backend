@@ -4,7 +4,8 @@ const cors = require("cors");
 const http = require("http");
 const socketIo = require("socket.io");
 // Load environment variables based on NODE_ENV
-const envFile = process.env.NODE_ENV === 'production' ? './config.prod.env' : './config.env';
+const envFile =
+  process.env.NODE_ENV === "production" ? "./config.prod.env" : "./config.env";
 require("dotenv").config({ path: envFile });
 
 const app = express();

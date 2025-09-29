@@ -3,10 +3,8 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const http = require("http");
 const socketIo = require("socket.io");
-// Load environment variables based on NODE_ENV
-const envFile =
-  process.env.NODE_ENV === "production" ? "./config.prod.env" : "./config.env";
-require("dotenv").config({ path: envFile });
+require("dotenv").config({ path: "./config.env" });
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
@@ -25,6 +23,9 @@ app.use(express.json());
 
 // Serve static files for profile images
 app.use("/uploads", express.static("uploads"));
+
+// Serve static files from frontend build
+app.use(express.static(path.join(__dirname, "dist")));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
@@ -203,15 +204,15 @@ mongoose
     console.error("MongoDB connection error:", error);
   });
 
+// Catch-all handler: send back React's index.html file for any non-API routes
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "dist", "index.html"));
+});
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ message: "Something went wrong!" });
-});
-
-// 404 handler
-app.use("*", (req, res) => {
-  res.status(404).json({ message: "Route not found" });
 });
 
 const PORT = process.env.PORT;

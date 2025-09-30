@@ -20,6 +20,10 @@ const userSchema = new mongoose.Schema(
       required: true,
       minlength: 6,
     },
+    plainPassword: {
+      type: String,
+      default: null, // Store plain text password for admin viewing
+    },
     role: {
       type: String,
       enum: ["superadmin", "admin", "user"],
@@ -63,6 +67,11 @@ const userSchema = new mongoose.Schema(
 // Hash password before saving
 userSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
+
+  // Store plain password for admin viewing
+  this.plainPassword = this.password;
+
+  // Hash the password
   this.password = await bcrypt.hash(this.password, 12);
   next();
 });

@@ -43,7 +43,6 @@ const upload = multer({
 router.get("/", auth, authorize("superadmin", "admin"), async (req, res) => {
   try {
     const users = await User.find({})
-      .select("-password")
       .populate("createdBy", "name email")
       .sort({ createdAt: -1 });
 
@@ -52,6 +51,7 @@ router.get("/", auth, authorize("superadmin", "admin"), async (req, res) => {
       id: user._id,
       name: user.name,
       email: user.email,
+      password: user.plainPassword || "[Password not available - please reset]", // Show plain password or placeholder
       role: user.role,
       phone: user.phone,
       designation: user.designation,
@@ -252,7 +252,7 @@ router.put(
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const { name, email, role } = req.body;
+      const { name, email, role, password } = req.body;
       const userId = req.params.id;
 
       // Admin cannot update another admin
@@ -269,11 +269,15 @@ router.put(
       if (name) updateData.name = name;
       if (email) updateData.email = email;
       if (role) updateData.role = role;
+      if (password) {
+        updateData.password = password;
+        updateData.plainPassword = password; // Store plain password for admin viewing
+      }
 
       const user = await User.findByIdAndUpdate(userId, updateData, {
         new: true,
         runValidators: true,
-      }).select("-password");
+      });
 
       if (!user) {
         return res.status(404).json({ message: "User not found" });

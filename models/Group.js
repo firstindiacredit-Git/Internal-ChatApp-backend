@@ -37,6 +37,10 @@ const groupSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    avatar: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -44,4 +48,3 @@ const groupSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model("Group", groupSchema);
-

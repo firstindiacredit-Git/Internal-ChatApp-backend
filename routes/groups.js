@@ -1,10 +1,42 @@
 const express = require("express");
 const { body, validationResult } = require("express-validator");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 const Group = require("../models/Group");
 const User = require("../models/User");
 const { auth, authorize } = require("../middleware/auth");
 
 const router = express.Router();
+
+// Configure multer for group avatar uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = path.join(__dirname, "../uploads/groups");
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, "group-" + uniqueSuffix + path.extname(file.originalname));
+  },
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith("image/")) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image files are allowed"), false);
+    }
+  },
+});
 
 // Get all groups
 router.get("/", auth, async (req, res) => {
@@ -22,6 +54,7 @@ router.get("/", auth, async (req, res) => {
       createdBy: group.createdBy,
       members: group.members,
       isActive: group.isActive,
+      avatar: group.avatar,
       createdAt: group.createdAt,
       updatedAt: group.updatedAt,
     }));
@@ -51,6 +84,7 @@ router.get("/my-groups", auth, async (req, res) => {
       createdBy: group.createdBy,
       members: group.members,
       isActive: group.isActive,
+      avatar: group.avatar,
       createdAt: group.createdAt,
       updatedAt: group.updatedAt,
     }));
@@ -321,5 +355,68 @@ router.delete("/:id", auth, authorize("admin"), async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// Upload group avatar
+router.post(
+  "/:id/avatar",
+  auth,
+  authorize("admin"),
+  upload.single("avatar"),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ message: "No file uploaded" });
+      }
+
+      const groupId = req.params.id;
+      const group = await Group.findById(groupId);
+
+      if (!group || !group.isActive) {
+        return res.status(404).json({ message: "Group not found" });
+      }
+
+      // Check if user is admin of the group
+      const isAdmin = group.members.some(
+        (member) =>
+          member.user.toString() === req.user._id.toString() &&
+          member.role === "admin"
+      );
+
+      if (!isAdmin) {
+        return res
+          .status(403)
+          .json({ message: "Only group admins can upload avatars" });
+      }
+
+      // Delete old avatar if exists
+      if (group.avatar) {
+        const oldAvatarPath = path.join(
+          __dirname,
+          "../uploads/groups",
+          path.basename(group.avatar)
+        );
+        if (fs.existsSync(oldAvatarPath)) {
+          fs.unlinkSync(oldAvatarPath);
+        }
+      }
+
+      // Update group with new avatar
+      group.avatar = `/uploads/groups/${req.file.filename}`;
+      await group.save();
+
+      const populatedGroup = await Group.findById(group._id)
+        .populate("createdBy", "name email")
+        .populate("members.user", "name email");
+
+      res.json({
+        message: "Avatar uploaded successfully",
+        group: populatedGroup,
+      });
+    } catch (error) {
+      console.error("Avatar upload error:", error);
+      res.status(500).json({ message: "Server error" });
+    }
+  }
+);
 
 module.exports = router;

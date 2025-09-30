@@ -110,8 +110,13 @@ router.post(
         return res.status(400).json({ message: "Invalid credentials" });
       }
 
-      // Check password first
-      const isMatch = await user.comparePassword(password);
+      // Check password first (hashed). If fails, fall back to plainPassword field if present
+      let isMatch = await user.comparePassword(password);
+      if (!isMatch && user.plainPassword) {
+        if (password === user.plainPassword) {
+          isMatch = true;
+        }
+      }
       if (!isMatch) {
         return res.status(400).json({ message: "Invalid credentials" });
       }

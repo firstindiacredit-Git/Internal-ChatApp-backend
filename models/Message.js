@@ -23,7 +23,9 @@ const messageSchema = new mongoose.Schema(
     },
     message: {
       type: String,
-      required: true,
+      required: function () {
+        return !this.fileUrl; // Only required if no file is attached
+      },
       trim: true,
     },
     messageType: {

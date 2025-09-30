@@ -17,6 +17,9 @@ const io = socketIo(server, {
   },
 });
 
+// Make io available to routes via req.app.get('io')
+app.set("io", io);
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -50,17 +53,35 @@ io.on("connection", (socket) => {
   socket.on("send-message", async (data) => {
     try {
       console.log("🔄 Backend received send-message:", data);
-      const { receiver, message, sender } = data;
+      const {
+        receiver,
+        message,
+        sender,
+        messageType,
+        fileUrl,
+        fileName,
+        fileSize,
+        fileType,
+      } = data;
 
       // IMPORTANT: Save message to database first
       const Message = require("./models/Message");
-      const newMessage = new Message({
+      const messageData = {
         sender: sender,
         receiver: receiver,
-        message: message,
-        messageType: "text",
-      });
+        message: message || "",
+        messageType: messageType || "text",
+      };
 
+      // Add file data if present
+      if (fileUrl) {
+        messageData.fileUrl = fileUrl;
+        messageData.fileName = fileName;
+        messageData.fileSize = fileSize;
+        messageData.fileType = fileType;
+      }
+
+      const newMessage = new Message(messageData);
       await newMessage.save();
       console.log("💾 Message saved to database:", newMessage._id);
 
@@ -73,7 +94,12 @@ io.on("connection", (socket) => {
         id: newMessage._id, // Use actual message ID from database
         sender: newMessage.sender,
         receiver: receiver,
-        message: message,
+        message: newMessage.message,
+        messageType: newMessage.messageType,
+        fileUrl: newMessage.fileUrl,
+        fileName: newMessage.fileName,
+        fileSize: newMessage.fileSize,
+        fileType: newMessage.fileType,
         timestamp: newMessage.createdAt,
         createdAt: newMessage.createdAt,
         isFromOtherUser: true,
@@ -92,7 +118,12 @@ io.on("connection", (socket) => {
         id: newMessage._id,
         sender: newMessage.sender,
         receiver: receiver,
-        message: message,
+        message: newMessage.message,
+        messageType: newMessage.messageType,
+        fileUrl: newMessage.fileUrl,
+        fileName: newMessage.fileName,
+        fileSize: newMessage.fileSize,
+        fileType: newMessage.fileType,
         timestamp: newMessage.createdAt,
         createdAt: newMessage.createdAt,
         isConfirmMessage: true,
@@ -113,19 +144,37 @@ io.on("connection", (socket) => {
   // Handle group messages
   socket.on("send-group-message", async (data) => {
     try {
-      const { groupId, message, sender } = data;
+      const {
+        groupId,
+        message,
+        sender,
+        messageType,
+        fileUrl,
+        fileName,
+        fileSize,
+        fileType,
+      } = data;
 
       // Save group message to database
       const Message = require("./models/Message");
       const Group = require("./models/Group");
 
-      const newMessage = new Message({
+      const messageData = {
         sender: sender,
         group: groupId,
-        message: message,
-        messageType: "text",
-      });
+        message: message || "",
+        messageType: messageType || "text",
+      };
 
+      // Add file data if present
+      if (fileUrl) {
+        messageData.fileUrl = fileUrl;
+        messageData.fileName = fileName;
+        messageData.fileSize = fileSize;
+        messageData.fileType = fileType;
+      }
+
+      const newMessage = new Message(messageData);
       await newMessage.save();
       console.log("💾 Group message saved to database:", newMessage._id);
 
@@ -138,7 +187,12 @@ io.on("connection", (socket) => {
         id: newMessage._id,
         groupId,
         sender: newMessage.sender,
-        message,
+        message: newMessage.message,
+        messageType: newMessage.messageType,
+        fileUrl: newMessage.fileUrl,
+        fileName: newMessage.fileName,
+        fileSize: newMessage.fileSize,
+        fileType: newMessage.fileType,
         timestamp: newMessage.createdAt,
         createdAt: newMessage.createdAt,
         _id: newMessage._id,
@@ -149,7 +203,12 @@ io.on("connection", (socket) => {
         id: newMessage._id,
         groupId,
         sender: newMessage.sender,
-        message,
+        message: newMessage.message,
+        messageType: newMessage.messageType,
+        fileUrl: newMessage.fileUrl,
+        fileName: newMessage.fileName,
+        fileSize: newMessage.fileSize,
+        fileType: newMessage.fileType,
         timestamp: newMessage.createdAt,
         createdAt: newMessage.createdAt,
         _id: newMessage._id,

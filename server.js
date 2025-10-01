@@ -5,6 +5,9 @@ const http = require("http");
 const socketIo = require("socket.io");
 require("dotenv").config({ path: "./config.env" });
 const path = require("path");
+const jwt = require("jsonwebtoken");
+const User = require("./models/User");
+const Call = require("./models/Call");
 
 const app = express();
 const server = http.createServer(app);
@@ -35,19 +38,42 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/users", require("./routes/users"));
 app.use("/api/groups", require("./routes/groups"));
 app.use("/api/messages", require("./routes/messages"));
+app.use("/api/calls", require("./routes/calls"));
 
-// Socket.io connection handling
-const connectedUsers = new Map();
+// Authenticate socket connections with JWT and track active users
+const activeUsers = new Map();
+
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth && socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error("Authentication error: No token provided"));
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId).select("-password");
+    if (!user) {
+      return next(new Error("Authentication error: User not found"));
+    }
+    socket.userId = user._id.toString();
+    socket.user = user;
+    next();
+  } catch (err) {
+    next(new Error("Authentication error: Invalid token"));
+  }
+});
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
+  console.log(
+    `✅ User connected: ${socket.user?.name || socket.userId} - ${socket.id}`
+  );
 
-  // Join user to their personal room
-  socket.on("join", (userId) => {
-    socket.join(userId);
-    connectedUsers.set(socket.id, userId);
-    console.log(`User ${userId} joined their room`);
+  // Track active users and join personal room
+  activeUsers.set(socket.userId, {
+    socketId: socket.id,
+    user: socket.user,
+    lastSeen: new Date(),
   });
+  socket.join(socket.userId);
 
   // Handle personal messages
   socket.on("send-message", async (data) => {
@@ -240,13 +266,267 @@ io.on("connection", (socket) => {
     });
   });
 
+  // ========================
+  // Call signaling handlers
+  // ========================
+  socket.on("call-initiate", async (data) => {
+    try {
+      const { receiverId, callType = "voice", callId } = data || {};
+      if (!receiverId) {
+        socket.emit("call-error", { error: "Receiver ID is required" });
+        return;
+      }
+      // Notify caller (confirmation)
+      socket.emit("call-initiated", {
+        callId,
+        callType,
+        receiver: await User.findById(receiverId).select("name avatar email"),
+      });
+      // Notify receiver if online
+      const receiverSocket = activeUsers.get(receiverId);
+      if (receiverSocket) {
+        io.to(receiverSocket.socketId).emit("incoming-call", {
+          callId,
+          caller: socket.user,
+          callType,
+        });
+      }
+    } catch (error) {
+      console.error("Call initiate error:", error);
+      socket.emit("call-error", { error: "Failed to initiate call" });
+    }
+  });
+
+  socket.on("call-answer", async (data) => {
+    try {
+      const { callId, answer } = data || {};
+      if (!callId) {
+        socket.emit("call-error", { error: "Call ID is required" });
+        return;
+      }
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+      if (call.receiver.toString() !== socket.userId) {
+        socket.emit("call-error", {
+          error: "Not authorized to answer this call",
+        });
+        return;
+      }
+      call.status = "answered";
+      if (answer) {
+        call.answer = JSON.stringify(answer);
+      }
+      await call.save();
+      const callerActive = activeUsers.get(call.caller.toString());
+      if (callerActive) {
+        io.to(callerActive.socketId).emit("call-answered", {
+          callId: call._id,
+          status: call.status,
+          answer,
+          receiver: socket.user,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("Call answer error:", error);
+      socket.emit("call-error", { error: "Failed to answer call" });
+    }
+  });
+
+  socket.on("call-decline", async (data) => {
+    try {
+      const { callId } = data || {};
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+      if (call.receiver.toString() !== socket.userId) {
+        socket.emit("call-error", {
+          error: "Not authorized to decline this call",
+        });
+        return;
+      }
+      await call.markAsDeclined();
+      socket.emit("call-declined", {
+        callId: call._id,
+        status: call.status,
+        callType: call.callType,
+      });
+      const callerActive = activeUsers.get(call.caller.toString());
+      if (callerActive) {
+        io.to(callerActive.socketId).emit("call-declined", {
+          callId: call._id,
+          status: call.status,
+          receiver: socket.user,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("Call decline error:", error);
+      socket.emit("call-error", { error: "Failed to decline call" });
+    }
+  });
+
+  socket.on("call-end", async (data) => {
+    try {
+      const { callId } = data || {};
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+      if (
+        call.caller.toString() !== socket.userId &&
+        call.receiver.toString() !== socket.userId
+      ) {
+        socket.emit("call-error", { error: "Not authorized to end this call" });
+        return;
+      }
+      await call.endCall();
+      socket.emit("call-ended", {
+        callId: call._id,
+        status: call.status,
+        duration: call.duration,
+        callType: call.callType,
+      });
+      const otherUserId =
+        call.caller.toString() === socket.userId
+          ? call.receiver.toString()
+          : call.caller.toString();
+      const otherSocket = activeUsers.get(otherUserId);
+      if (otherSocket) {
+        io.to(otherSocket.socketId).emit("call-ended", {
+          callId: call._id,
+          status: call.status,
+          duration: call.duration,
+          endedBy: socket.user,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("Call end error:", error);
+      socket.emit("call-error", { error: "Failed to end call" });
+    }
+  });
+
+  socket.on("call-offer", async (data) => {
+    try {
+      const { callId, offer } = data || {};
+      if (!callId || !offer) {
+        socket.emit("call-error", { error: "Call ID and offer are required" });
+        return;
+      }
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+      if (call.caller.toString() !== socket.userId) {
+        socket.emit("call-error", { error: "Not authorized to send offer" });
+        return;
+      }
+      call.offer = JSON.stringify(offer);
+      await call.save();
+      const receiverActive = activeUsers.get(call.receiver.toString());
+      if (receiverActive) {
+        io.to(receiverActive.socketId).emit("call-offer", {
+          callId: call._id,
+          offer,
+          from: socket.user,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("Call offer error:", error);
+      socket.emit("call-error", { error: "Failed to send call offer" });
+    }
+  });
+
+  socket.on("call-answer-webrtc", async (data) => {
+    try {
+      const { callId, answer } = data || {};
+      if (!callId || !answer) {
+        socket.emit("call-error", { error: "Call ID and answer are required" });
+        return;
+      }
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+      if (call.receiver.toString() !== socket.userId) {
+        socket.emit("call-error", { error: "Not authorized to send answer" });
+        return;
+      }
+      call.answer = JSON.stringify(answer);
+      await call.save();
+      const callerActive = activeUsers.get(call.caller.toString());
+      if (callerActive) {
+        io.to(callerActive.socketId).emit("call-answer-webrtc", {
+          callId: call._id,
+          answer,
+          from: socket.user,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("WebRTC answer error:", error);
+      socket.emit("call-error", { error: "Failed to send answer" });
+    }
+  });
+
+  socket.on("ice-candidate", async (data) => {
+    try {
+      const { callId, candidate, sdpMLineIndex, sdpMid } = data || {};
+      if (!callId || !candidate) {
+        socket.emit("call-error", {
+          error: "Call ID and candidate are required",
+        });
+        return;
+      }
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+      // Save candidate (optional)
+      try {
+        call.iceCandidates.push({ candidate, sdpMLineIndex, sdpMid });
+        await call.save();
+      } catch (_) {}
+      const otherUserId =
+        call.caller.toString() === socket.userId
+          ? call.receiver.toString()
+          : call.caller.toString();
+      const otherSocket = activeUsers.get(otherUserId);
+      if (otherSocket) {
+        io.to(otherSocket.socketId).emit("ice-candidate", {
+          callId: call._id,
+          candidate,
+          sdpMLineIndex,
+          sdpMid,
+          from: socket.user,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("ICE candidate error:", error);
+      socket.emit("call-error", { error: "Failed to send ICE candidate" });
+    }
+  });
+
   // Handle disconnect
   socket.on("disconnect", () => {
-    const userId = connectedUsers.get(socket.id);
-    if (userId) {
-      connectedUsers.delete(socket.id);
-      console.log(`User ${userId} disconnected`);
-    }
+    activeUsers.delete(socket.userId);
+    console.log(
+      `❌ User disconnected: ${socket.user?.name || socket.userId} - ${
+        socket.id
+      }`
+    );
   });
 });
 

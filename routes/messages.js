@@ -958,12 +958,10 @@ router.post("/chat-state", auth, async (req, res) => {
     if (action === "clear_unread" && chatId) {
       if (chatType === "personal") {
         // Mark all messages from this user as read
-        await Message.updateMany(
+        const updateResult = await Message.updateMany(
           {
-            $or: [
-              { sender: chatId, receiver: userId },
-              { sender: userId, receiver: chatId },
-            ],
+            sender: chatId,
+            receiver: userId,
             "readBy.user": { $ne: userId },
           },
           {
@@ -973,8 +971,31 @@ router.post("/chat-state", auth, async (req, res) => {
                 readAt: new Date(),
               },
             },
+            $set: { isRead: true },
           }
         );
+
+        // Emit socket event to notify sender that messages were seen
+        if (updateResult.modifiedCount > 0) {
+          try {
+            const io = req.app.get("io");
+            if (io) {
+              io.to(chatId.toString()).emit("messages-seen", {
+                readBy: userId.toString(),
+                chatId: userId.toString(),
+                timestamp: new Date(),
+              });
+              console.log(
+                `✅ Notified user ${chatId} that messages were seen by ${userId}`
+              );
+            }
+          } catch (socketError) {
+            console.warn(
+              "Socket emit failed for messages-seen:",
+              socketError.message
+            );
+          }
+        }
       } else if (chatType === "group") {
         // Mark all unread group messages as read by this user
         await Message.updateMany(

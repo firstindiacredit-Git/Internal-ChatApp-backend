@@ -272,23 +272,53 @@ io.on("connection", (socket) => {
   socket.on("call-initiate", async (data) => {
     try {
       const { receiverId, callType = "voice", callId } = data || {};
+      console.log(`📞 Call initiate request:`, {
+        receiverId,
+        callType,
+        callId,
+        caller: socket.userId,
+        callerName: socket.user?.name,
+      });
+
       if (!receiverId) {
         socket.emit("call-error", { error: "Receiver ID is required" });
         return;
       }
+
       // Notify caller (confirmation)
       socket.emit("call-initiated", {
         callId,
         callType,
         receiver: await User.findById(receiverId).select("name avatar email"),
       });
-      // Notify receiver if online
-      const receiverSocket = activeUsers.get(receiverId);
-      if (receiverSocket) {
-        io.to(receiverSocket.socketId).emit("incoming-call", {
+
+      // Notify receiver if online - Check both string and object ID formats
+      const receiverSocketData =
+        activeUsers.get(receiverId) || activeUsers.get(receiverId.toString());
+
+      console.log(`🔍 Looking for receiver ${receiverId}:`, {
+        found: !!receiverSocketData,
+        activeUsersCount: activeUsers.size,
+        activeUserIds: Array.from(activeUsers.keys()),
+      });
+
+      if (receiverSocketData) {
+        console.log(
+          `✅ Receiver ${receiverId} is online, sending incoming-call to socket ${receiverSocketData.socketId}`
+        );
+        io.to(receiverSocketData.socketId).emit("incoming-call", {
           callId,
           caller: socket.user,
           callType,
+        });
+        console.log(
+          `📤 Incoming call notification sent to receiver ${receiverId}`
+        );
+      } else {
+        console.log(`❌ Receiver ${receiverId} is not online`);
+        socket.emit("call-error", {
+          error: "Receiver is not online",
+          receiverId: receiverId,
         });
       }
     } catch (error) {

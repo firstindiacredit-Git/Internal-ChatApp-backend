@@ -39,6 +39,7 @@ app.use("/api/users", require("./routes/users"));
 app.use("/api/groups", require("./routes/groups"));
 app.use("/api/messages", require("./routes/messages"));
 app.use("/api/calls", require("./routes/calls"));
+app.use("/api/group-calls", require("./routes/groupCalls"));
 
 // Authenticate socket connections with JWT and track active users
 const activeUsers = new Map();
@@ -546,6 +547,390 @@ io.on("connection", (socket) => {
     } catch (error) {
       console.error("ICE candidate error:", error);
       socket.emit("call-error", { error: "Failed to send ICE candidate" });
+    }
+  });
+
+  // ========================
+  // Group Call signaling handlers
+  // ========================
+  socket.on("group-call-initiate", async (data) => {
+    try {
+      const { groupId, callType = "voice", callId } = data || {};
+      console.log(`📞 Group call initiate request:`, {
+        groupId,
+        callType,
+        callId,
+        initiator: socket.userId,
+        initiatorName: socket.user?.name,
+      });
+
+      if (!groupId) {
+        socket.emit("group-call-error", { error: "Group ID is required" });
+        return;
+      }
+
+      // Notify initiator (confirmation)
+      socket.emit("group-call-initiated", {
+        callId,
+        callType,
+        groupId,
+        initiator: socket.user,
+      });
+
+      // Notify all group members about the new call
+      const Group = require("./models/Group");
+      const group = await Group.findById(groupId).populate(
+        "members.user",
+        "name avatar email"
+      );
+
+      if (group) {
+        group.members.forEach((member) => {
+          const memberSocketData = activeUsers.get(member.user._id.toString());
+          if (
+            memberSocketData &&
+            member.user._id.toString() !== socket.userId
+          ) {
+            console.log(
+              `📤 Notifying group member ${member.user.name} about new call`
+            );
+            io.to(memberSocketData.socketId).emit("incoming-group-call", {
+              callId,
+              callType,
+              groupId,
+              groupName: group.name,
+              initiator: socket.user,
+            });
+          }
+        });
+      }
+    } catch (error) {
+      console.error("Group call initiate error:", error);
+      socket.emit("group-call-error", {
+        error: "Failed to initiate group call",
+      });
+    }
+  });
+
+  socket.on("group-call-join", async (data) => {
+    try {
+      const { callId, groupId } = data || {};
+      console.log(`📞 Group call join request:`, {
+        callId,
+        groupId,
+        userId: socket.userId,
+        userName: socket.user?.name,
+      });
+
+      if (!callId || !groupId) {
+        socket.emit("group-call-error", {
+          error: "Call ID and Group ID are required",
+        });
+        return;
+      }
+
+      // Notify all other participants in the call
+      const GroupCall = require("./models/GroupCall");
+      const groupCall = await GroupCall.findById(callId).populate(
+        "participants.user",
+        "name avatar email"
+      );
+
+      if (groupCall) {
+        groupCall.participants.forEach((participant) => {
+          if (
+            participant.user._id.toString() !== socket.userId &&
+            participant.isActive
+          ) {
+            const participantSocketData = activeUsers.get(
+              participant.user._id.toString()
+            );
+            if (participantSocketData) {
+              console.log(
+                `📤 Notifying participant ${participant.user.name} about new joiner`
+              );
+              io.to(participantSocketData.socketId).emit(
+                "group-call-participant-joined",
+                {
+                  callId,
+                  groupId,
+                  newParticipant: socket.user,
+                }
+              );
+            }
+          }
+        });
+      }
+
+      // Confirm join to the user
+      socket.emit("group-call-joined", {
+        callId,
+        groupId,
+        participant: socket.user,
+      });
+    } catch (error) {
+      console.error("Group call join error:", error);
+      socket.emit("group-call-error", { error: "Failed to join group call" });
+    }
+  });
+
+  socket.on("group-call-leave", async (data) => {
+    try {
+      const { callId, groupId } = data || {};
+      console.log(`📞 Group call leave request:`, {
+        callId,
+        groupId,
+        userId: socket.userId,
+        userName: socket.user?.name,
+      });
+
+      if (!callId || !groupId) {
+        socket.emit("group-call-error", {
+          error: "Call ID and Group ID are required",
+        });
+        return;
+      }
+
+      // Notify all other participants in the call
+      const GroupCall = require("./models/GroupCall");
+      const groupCall = await GroupCall.findById(callId).populate(
+        "participants.user",
+        "name avatar email"
+      );
+
+      if (groupCall) {
+        // Check if the leaving user is the initiator
+        const isInitiator = groupCall.initiator.toString() === socket.userId;
+
+        if (isInitiator) {
+          // If initiator leaves, end the call for everyone
+          console.log(
+            `📞 Initiator ${socket.user?.name} left, ending call for all participants`
+          );
+
+          // End the call in database
+          await groupCall.endCall();
+
+          // Notify all participants that call has ended
+          groupCall.participants.forEach((participant) => {
+            if (participant.isActive) {
+              const participantSocketData = activeUsers.get(
+                participant.user._id.toString()
+              );
+              if (participantSocketData) {
+                console.log(
+                  `📤 Notifying participant ${participant.user.name} about call end`
+                );
+                io.to(participantSocketData.socketId).emit("group-call-ended", {
+                  callId,
+                  groupId,
+                  reason: "Initiator left the call",
+                  endedBy: socket.user,
+                });
+              }
+            }
+          });
+        } else {
+          // Regular participant leaving, just notify others
+          groupCall.participants.forEach((participant) => {
+            if (
+              participant.user._id.toString() !== socket.userId &&
+              participant.isActive
+            ) {
+              const participantSocketData = activeUsers.get(
+                participant.user._id.toString()
+              );
+              if (participantSocketData) {
+                console.log(
+                  `📤 Notifying participant ${participant.user.name} about leaver`
+                );
+                io.to(participantSocketData.socketId).emit(
+                  "group-call-participant-left",
+                  {
+                    callId,
+                    groupId,
+                    leftParticipant: socket.user,
+                  }
+                );
+              }
+            }
+          });
+        }
+      }
+
+      // Confirm leave to the user
+      socket.emit("group-call-left", {
+        callId,
+        groupId,
+        participant: socket.user,
+      });
+    } catch (error) {
+      console.error("Group call leave error:", error);
+      socket.emit("group-call-error", { error: "Failed to leave group call" });
+    }
+  });
+
+  socket.on("group-call-end", async (data) => {
+    try {
+      const { callId, groupId } = data || {};
+      console.log(`📞 Group call end request:`, {
+        callId,
+        groupId,
+        userId: socket.userId,
+        userName: socket.user?.name,
+      });
+
+      if (!callId || !groupId) {
+        socket.emit("group-call-error", {
+          error: "Call ID and Group ID are required",
+        });
+        return;
+      }
+
+      // Notify all participants in the call
+      const GroupCall = require("./models/GroupCall");
+      const groupCall = await GroupCall.findById(callId).populate(
+        "participants.user",
+        "name avatar email"
+      );
+
+      if (groupCall) {
+        groupCall.participants.forEach((participant) => {
+          if (participant.isActive) {
+            const participantSocketData = activeUsers.get(
+              participant.user._id.toString()
+            );
+            if (participantSocketData) {
+              console.log(
+                `📤 Notifying participant ${participant.user.name} about call end`
+              );
+              io.to(participantSocketData.socketId).emit("group-call-ended", {
+                callId,
+                groupId,
+                endedBy: socket.user,
+              });
+            }
+          }
+        });
+      }
+    } catch (error) {
+      console.error("Group call end error:", error);
+      socket.emit("group-call-error", { error: "Failed to end group call" });
+    }
+  });
+
+  // Group call WebRTC signaling
+  socket.on("group-call-offer", async (data) => {
+    try {
+      const { callId, groupId, targetUserId, offer } = data || {};
+      console.log(`📞 Group call offer:`, {
+        callId,
+        groupId,
+        from: socket.userId,
+        to: targetUserId,
+      });
+
+      if (!callId || !groupId || !targetUserId || !offer) {
+        socket.emit("group-call-error", {
+          error: "Call ID, Group ID, target user ID, and offer are required",
+        });
+        return;
+      }
+
+      const targetSocketData = activeUsers.get(targetUserId);
+      if (targetSocketData) {
+        io.to(targetSocketData.socketId).emit("group-call-offer", {
+          callId,
+          groupId,
+          from: socket.user,
+          offer,
+        });
+      }
+    } catch (error) {
+      console.error("Group call offer error:", error);
+      socket.emit("group-call-error", {
+        error: "Failed to send group call offer",
+      });
+    }
+  });
+
+  socket.on("group-call-answer", async (data) => {
+    try {
+      const { callId, groupId, targetUserId, answer } = data || {};
+      console.log(`📞 Group call answer:`, {
+        callId,
+        groupId,
+        from: socket.userId,
+        to: targetUserId,
+      });
+
+      if (!callId || !groupId || !targetUserId || !answer) {
+        socket.emit("group-call-error", {
+          error: "Call ID, Group ID, target user ID, and answer are required",
+        });
+        return;
+      }
+
+      const targetSocketData = activeUsers.get(targetUserId);
+      if (targetSocketData) {
+        io.to(targetSocketData.socketId).emit("group-call-answer", {
+          callId,
+          groupId,
+          from: socket.user,
+          answer,
+        });
+      }
+    } catch (error) {
+      console.error("Group call answer error:", error);
+      socket.emit("group-call-error", {
+        error: "Failed to send group call answer",
+      });
+    }
+  });
+
+  socket.on("group-call-ice-candidate", async (data) => {
+    try {
+      console.log(`📞 Group call ICE candidate received:`, data);
+      const {
+        callId,
+        groupId,
+        targetUserId,
+        candidate,
+        sdpMLineIndex,
+        sdpMid,
+      } = data || {};
+      console.log(`📞 Group call ICE candidate parsed:`, {
+        callId,
+        groupId,
+        from: socket.userId,
+        to: targetUserId,
+        hasCandidate: !!candidate,
+      });
+
+      if (!callId || !groupId || !targetUserId || !candidate) {
+        socket.emit("group-call-error", {
+          error:
+            "Call ID, Group ID, target user ID, and candidate are required",
+        });
+        return;
+      }
+
+      const targetSocketData = activeUsers.get(targetUserId);
+      if (targetSocketData) {
+        io.to(targetSocketData.socketId).emit("group-call-ice-candidate", {
+          callId,
+          groupId,
+          from: socket.user,
+          candidate,
+          sdpMLineIndex,
+          sdpMid,
+        });
+      }
+    } catch (error) {
+      console.error("Group call ICE candidate error:", error);
+      socket.emit("group-call-error", {
+        error: "Failed to send group call ICE candidate",
+      });
     }
   });
 

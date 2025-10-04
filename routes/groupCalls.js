@@ -319,8 +319,19 @@ router.put(
         });
       }
 
+      console.log(`🔍 Update participant status request:`, {
+        callId,
+        userId,
+        currentUserId,
+        isMuted,
+        isVideoEnabled,
+      });
+
       // Check if current user is in the call
-      if (!groupCall.isUserInCall(currentUserId)) {
+      const isUserInCall = groupCall.isUserInCall(currentUserId);
+      console.log(`👤 User ${currentUserId} is in call:`, isUserInCall);
+
+      if (!isUserInCall) {
         return res.status(403).json({
           success: false,
           message: "You are not in this call",
@@ -328,7 +339,12 @@ router.put(
       }
 
       // Users can only update their own status, or host can update anyone's
-      if (currentUserId !== userId && !groupCall.isUserHost(currentUserId)) {
+      const isUserHost = groupCall.isUserHost(currentUserId);
+      const isUpdatingSelf = currentUserId === userId;
+      console.log(`👑 User ${currentUserId} is host:`, isUserHost);
+      console.log(`🔄 User updating self:`, isUpdatingSelf);
+
+      if (!isUpdatingSelf && !isUserHost) {
         return res.status(403).json({
           success: false,
           message: "You can only update your own status",
@@ -429,22 +445,95 @@ router.get("/:callId", authenticateToken, async (req, res) => {
 
     let groupCall;
     try {
+      console.log(`🔍 Attempting to find group call with ID: ${callId}`);
+
+      // First try to find the group call without population
+      const basicGroupCall = await GroupCall.findById(callId);
+      console.log(`🔍 Basic group call found:`, basicGroupCall ? "Yes" : "No");
+
+      if (!basicGroupCall) {
+        return res.status(404).json({
+          success: false,
+          message: "Group call not found",
+        });
+      }
+
+      console.log(`🔍 Group call data:`, {
+        id: basicGroupCall._id,
+        group: basicGroupCall.group,
+        initiator: basicGroupCall.initiator,
+        participantsCount: basicGroupCall.participants.length,
+      });
+
+      // Now try with population
       groupCall = await GroupCall.findById(callId)
         .populate("group", "name members")
         .populate("initiator", "name avatar email")
         .populate("participants.user", "name avatar email");
+
+      console.log(
+        `🔍 Group call with population found:`,
+        groupCall ? "Yes" : "No"
+      );
     } catch (populateError) {
       console.error("Population error:", populateError);
       console.error("Population error details:", {
         message: populateError.message,
         stack: populateError.stack,
         callId: callId,
+        name: populateError.name,
+        code: populateError.code,
       });
-      return res.status(500).json({
-        success: false,
-        message: "Failed to fetch group call details",
-        error: populateError.message,
-      });
+
+      // Fallback: try to get basic group call data without population
+      try {
+        console.log("🔄 Attempting fallback without population");
+        const fallbackGroupCall = await GroupCall.findById(callId);
+
+        if (!fallbackGroupCall) {
+          return res.status(404).json({
+            success: false,
+            message: "Group call not found",
+          });
+        }
+
+        // Return basic data without population
+        return res.json({
+          success: true,
+          data: {
+            call: {
+              _id: fallbackGroupCall._id,
+              callType: fallbackGroupCall.callType,
+              status: fallbackGroupCall.status,
+              roomName: fallbackGroupCall.roomName,
+              startTime: fallbackGroupCall.startTime,
+              endTime: fallbackGroupCall.endTime,
+              duration: fallbackGroupCall.duration,
+              group: fallbackGroupCall.group,
+              initiator: fallbackGroupCall.initiator,
+              participants: fallbackGroupCall.participants,
+              activeParticipantsCount:
+                fallbackGroupCall.activeParticipantsCount,
+              maxParticipants: fallbackGroupCall.maxParticipants,
+              quality: fallbackGroupCall.quality,
+              notes: fallbackGroupCall.notes,
+              isRecorded: fallbackGroupCall.isRecorded,
+              recordingUrl: fallbackGroupCall.recordingUrl,
+            },
+          },
+        });
+      } catch (fallbackError) {
+        console.error("Fallback error:", fallbackError);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to fetch group call details",
+          error: populateError.message,
+          details: {
+            name: populateError.name,
+            code: populateError.code,
+          },
+        });
+      }
     }
 
     console.log(`📞 Group call found:`, groupCall ? "Yes" : "No");

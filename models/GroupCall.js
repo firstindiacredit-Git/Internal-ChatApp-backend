@@ -1,5 +1,38 @@
 const mongoose = require("mongoose");
 
+const participantSchema = new mongoose.Schema({
+  user: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
+  },
+  joinedAt: {
+    type: Date,
+    default: Date.now,
+  },
+  leftAt: {
+    type: Date,
+    default: null,
+  },
+  isActive: {
+    type: Boolean,
+    default: true,
+  },
+  isMuted: {
+    type: Boolean,
+    default: false,
+  },
+  isVideoEnabled: {
+    type: Boolean,
+    default: true,
+  },
+  role: {
+    type: String,
+    enum: ["participant", "host"],
+    default: "participant",
+  },
+});
+
 const groupCallSchema = new mongoose.Schema(
   {
     group: {
@@ -27,40 +60,6 @@ const groupCallSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
-    participants: [
-      {
-        user: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "User",
-          required: true,
-        },
-        joinedAt: {
-          type: Date,
-          default: Date.now,
-        },
-        leftAt: {
-          type: Date,
-          default: null,
-        },
-        isMuted: {
-          type: Boolean,
-          default: false,
-        },
-        isVideoEnabled: {
-          type: Boolean,
-          default: true,
-        },
-        isActive: {
-          type: Boolean,
-          default: true,
-        },
-        role: {
-          type: String,
-          enum: ["host", "participant"],
-          default: "participant",
-        },
-      },
-    ],
     startTime: {
       type: Date,
       default: Date.now,
@@ -72,6 +71,11 @@ const groupCallSchema = new mongoose.Schema(
     duration: {
       type: Number, // Duration in seconds
       default: 0,
+    },
+    participants: [participantSchema],
+    maxParticipants: {
+      type: Number,
+      default: 10,
     },
     // Call quality metrics
     quality: {
@@ -101,11 +105,6 @@ const groupCallSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    // Maximum participants allowed
-    maxParticipants: {
-      type: Number,
-      default: 10,
-    },
   },
   {
     timestamps: true,
@@ -114,6 +113,7 @@ const groupCallSchema = new mongoose.Schema(
 
 // Index for efficient querying
 groupCallSchema.index({ group: 1, startTime: -1 });
+groupCallSchema.index({ initiator: 1, startTime: -1 });
 groupCallSchema.index({ status: 1 });
 groupCallSchema.index({ callType: 1 });
 groupCallSchema.index({ roomName: 1 });
@@ -131,97 +131,6 @@ groupCallSchema.virtual("activeParticipantsCount").get(function () {
   return this.participants.filter((p) => p.isActive).length;
 });
 
-// Method to add a participant
-groupCallSchema.methods.addParticipant = function (
-  userId,
-  role = "participant"
-) {
-  const existingParticipant = this.participants.find(
-    (p) => p.user.toString() === userId.toString()
-  );
-
-  if (existingParticipant) {
-    // Rejoin if already exists
-    existingParticipant.isActive = true;
-    existingParticipant.joinedAt = new Date();
-    existingParticipant.leftAt = null;
-  } else {
-    // Add new participant
-    this.participants.push({
-      user: userId,
-      role: role,
-      joinedAt: new Date(),
-      isActive: true,
-    });
-  }
-
-  return this.save();
-};
-
-// Method to remove a participant
-groupCallSchema.methods.removeParticipant = function (userId) {
-  const participant = this.participants.find(
-    (p) => p.user.toString() === userId.toString()
-  );
-
-  if (participant) {
-    participant.isActive = false;
-    participant.leftAt = new Date();
-  }
-
-  return this.save();
-};
-
-// Method to update participant status
-groupCallSchema.methods.updateParticipantStatus = function (userId, updates) {
-  const participant = this.participants.find(
-    (p) => p.user.toString() === userId.toString()
-  );
-
-  if (participant) {
-    Object.assign(participant, updates);
-  }
-
-  return this.save();
-};
-
-// Method to end the call
-groupCallSchema.methods.endCall = function () {
-  this.status = "ended";
-  this.endTime = new Date();
-  this.duration = this.calculatedDuration;
-
-  // Mark all participants as inactive
-  this.participants.forEach((participant) => {
-    participant.isActive = false;
-    if (!participant.leftAt) {
-      participant.leftAt = new Date();
-    }
-  });
-
-  return this.save();
-};
-
-// Method to get active participants
-groupCallSchema.methods.getActiveParticipants = function () {
-  return this.participants.filter((p) => p.isActive);
-};
-
-// Method to check if user is in the call
-groupCallSchema.methods.isUserInCall = function (userId) {
-  return this.participants.some(
-    (p) => p.user.toString() === userId.toString() && p.isActive
-  );
-};
-
-// Method to check if user is the host
-groupCallSchema.methods.isUserHost = function (userId) {
-  const participant = this.participants.find(
-    (p) => p.user.toString() === userId.toString()
-  );
-  return participant && participant.role === "host";
-};
-
 // Static method to create a new group call
 groupCallSchema.statics.createGroupCall = async function (
   groupId,
@@ -229,9 +138,9 @@ groupCallSchema.statics.createGroupCall = async function (
   callType = "voice"
 ) {
   // Generate unique room name
-  const timestamp = Date.now().toString().slice(-8);
-  const random = Math.random().toString(36).substr(2, 6);
-  const roomName = `group-call-${groupId}-${timestamp}-${random}`;
+  const roomName = `group-${groupId}-${Date.now()}-${Math.floor(
+    Math.random() * 1000000
+  )}`;
 
   const groupCall = new this({
     group: groupId,
@@ -249,6 +158,97 @@ groupCallSchema.statics.createGroupCall = async function (
   });
 
   return await groupCall.save();
+};
+
+// Method to add a participant to the call
+groupCallSchema.methods.addParticipant = async function (userId) {
+  // Check if user is already a participant
+  const existingParticipant = this.participants.find(
+    (p) => p.user.toString() === userId && p.isActive
+  );
+
+  if (existingParticipant) {
+    // If user was in call but left, reactivate them
+    existingParticipant.isActive = true;
+    existingParticipant.leftAt = null;
+  } else {
+    // Add new participant
+    this.participants.push({
+      user: userId,
+      role: "participant",
+      joinedAt: new Date(),
+      isActive: true,
+    });
+  }
+
+  return await this.save();
+};
+
+// Method to remove a participant from the call
+groupCallSchema.methods.removeParticipant = async function (userId) {
+  const participant = this.participants.find(
+    (p) => p.user.toString() === userId && p.isActive
+  );
+
+  if (participant) {
+    participant.isActive = false;
+    participant.leftAt = new Date();
+  }
+
+  return await this.save();
+};
+
+// Method to get active participants
+groupCallSchema.methods.getActiveParticipants = function () {
+  return this.participants.filter((p) => p.isActive);
+};
+
+// Method to check if user is in the call
+groupCallSchema.methods.isUserInCall = function (userId) {
+  return this.participants.some(
+    (p) => p.user.toString() === userId && p.isActive
+  );
+};
+
+// Method to check if user is the host
+groupCallSchema.methods.isUserHost = function (userId) {
+  return this.participants.some(
+    (p) => p.user.toString() === userId && p.role === "host" && p.isActive
+  );
+};
+
+// Method to update participant status
+groupCallSchema.methods.updateParticipantStatus = async function (
+  userId,
+  updates
+) {
+  const participant = this.participants.find(
+    (p) => p.user.toString() === userId && p.isActive
+  );
+
+  if (participant) {
+    Object.assign(participant, updates);
+    return await this.save();
+  }
+
+  throw new Error("Participant not found or not active");
+};
+
+// Method to end the call
+groupCallSchema.methods.endCall = async function () {
+  this.status = "ended";
+  this.endTime = new Date();
+  this.duration = this.calculatedDuration;
+
+  // Mark all participants as inactive
+  this.participants.forEach((participant) => {
+    if (participant.isActive) {
+      participant.isActive = false;
+      participant.leftAt = new Date();
+    }
+  });
+
+  return await this.save();
 };
 
 module.exports = mongoose.model("GroupCall", groupCallSchema);

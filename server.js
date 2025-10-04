@@ -646,15 +646,27 @@ io.on("connection", (socket) => {
               participant.user._id.toString()
             );
             if (participantSocketData) {
+              const newParticipantData = {
+                id: socket.user._id.toString(),
+                name: socket.user.name,
+                email: socket.user.email,
+                role: socket.user.role,
+                isActive: true,
+              };
               console.log(
-                `📤 Notifying participant ${participant.user.name} about new joiner`
+                `📤 Notifying participant ${participant.user.name} about new joiner:`,
+                {
+                  callId,
+                  groupId,
+                  newParticipant: newParticipantData,
+                }
               );
               io.to(participantSocketData.socketId).emit(
                 "group-call-participant-joined",
                 {
                   callId,
                   groupId,
-                  newParticipant: socket.user,
+                  newParticipant: newParticipantData,
                 }
               );
             }

@@ -44,8 +44,6 @@ app.use("/api/group-calls", require("./routes/groupCalls"));
 
 // Authenticate socket connections with JWT and track active users
 const activeUsers = new Map();
-// Dedup keys for noisy group-call logs (offer)
-const seenGroupOfferLogs = new Set();
 
 io.use(async (socket, next) => {
   try {
@@ -675,54 +673,13 @@ io.on("connection", (socket) => {
             }
           }
         });
-
-        // Also emit the full active participants list to all current participants
-        const participantsPayload = (groupCall.participants || [])
-          .filter((p) => p.isActive && p.user)
-          .map((p) => ({
-            id: p.user._id.toString(),
-            name: p.user.name,
-            email: p.user.email,
-            avatar: p.user.avatar || p.user.profileImage || null,
-            isActive: true,
-          }));
-
-        groupCall.participants.forEach((participant) => {
-          if (participant.isActive) {
-            const participantSocketData = activeUsers.get(
-              participant.user._id.toString()
-            );
-            if (participantSocketData) {
-              io.to(participantSocketData.socketId).emit(
-                "group-call-participants",
-                {
-                  callId,
-                  groupId,
-                  participants: participantsPayload,
-                }
-              );
-            }
-          }
-        });
       }
 
-      // Confirm join to the user with current active participants
-      const participantsPayload = (groupCall?.participants || [])
-        .filter((p) => p.isActive && p.user)
-        .map((p) => ({
-          id:
-            p.user._id?.toString?.() || p.user?.toString?.() || String(p.user),
-          name: p.user.name,
-          email: p.user.email,
-          avatar: p.user.avatar || p.user.profileImage || null,
-          isActive: !!p.isActive,
-        }));
-
+      // Confirm join to the user
       socket.emit("group-call-joined", {
         callId,
         groupId,
         participant: socket.user,
-        participants: participantsPayload,
       });
     } catch (error) {
       console.error("Group call join error:", error);
@@ -811,41 +768,6 @@ io.on("connection", (socket) => {
               }
             }
           });
-
-          // Recompute and emit the full active participants list after leave
-          const participantsPayload = (groupCall.participants || [])
-            .filter(
-              (p) =>
-                p.isActive && p.user && p.user._id.toString() !== socket.userId
-            )
-            .map((p) => ({
-              id: p.user._id.toString(),
-              name: p.user.name,
-              email: p.user.email,
-              avatar: p.user.avatar || p.user.profileImage || null,
-              isActive: true,
-            }));
-
-          groupCall.participants.forEach((participant) => {
-            if (
-              participant.user._id.toString() !== socket.userId &&
-              participant.isActive
-            ) {
-              const participantSocketData = activeUsers.get(
-                participant.user._id.toString()
-              );
-              if (participantSocketData) {
-                io.to(participantSocketData.socketId).emit(
-                  "group-call-participants",
-                  {
-                    callId,
-                    groupId,
-                    participants: participantsPayload,
-                  }
-                );
-              }
-            }
-          });
         }
       }
 
@@ -914,20 +836,12 @@ io.on("connection", (socket) => {
   socket.on("group-call-offer", async (data) => {
     try {
       const { callId, groupId, targetUserId, offer } = data || {};
-      if (process.env.DEBUG_GROUP_CALL === "1") {
-        const key = `${callId || "no-call"}:${socket.userId || "no-user"}:${
-          targetUserId || "broadcast"
-        }`;
-        if (!seenGroupOfferLogs.has(key)) {
-          console.log(`📞 Group call offer`, {
-            callId,
-            groupId,
-            from: socket.userId,
-            to: targetUserId,
-          });
-          seenGroupOfferLogs.add(key);
-        }
-      }
+      console.log(`📞 Group call offer:`, {
+        callId,
+        groupId,
+        from: socket.userId,
+        to: targetUserId,
+      });
 
       if (!callId || !groupId || !targetUserId || !offer) {
         socket.emit("group-call-error", {
@@ -956,15 +870,12 @@ io.on("connection", (socket) => {
   socket.on("group-call-answer", async (data) => {
     try {
       const { callId, groupId, targetUserId, answer } = data || {};
-      // Silence repeated logs by default; opt-in with DEBUG_GROUP_CALL
-      if (process.env.DEBUG_GROUP_CALL === "1") {
-        console.log(`📞 Group call answer`, {
-          callId,
-          groupId,
-          from: socket.userId,
-          to: targetUserId,
-        });
-      }
+      console.log(`📞 Group call answer:`, {
+        callId,
+        groupId,
+        from: socket.userId,
+        to: targetUserId,
+      });
 
       if (!callId || !groupId || !targetUserId || !answer) {
         socket.emit("group-call-error", {
@@ -992,6 +903,7 @@ io.on("connection", (socket) => {
 
   socket.on("group-call-ice-candidate", async (data) => {
     try {
+      console.log(`📞 Group call ICE candidate received:`, data);
       const {
         callId,
         groupId,
@@ -1000,117 +912,38 @@ io.on("connection", (socket) => {
         sdpMLineIndex,
         sdpMid,
       } = data || {};
-      if (process.env.DEBUG_GROUP_CALL === "1") {
-        console.log(`🧊 Group call ICE candidate`, {
-          callId,
-          groupId,
-          from: socket.userId,
-          to: targetUserId,
-          hasCandidate: !!candidate,
-          sdpMid,
-          sdpMLineIndex,
-        });
-      }
+      console.log(`📞 Group call ICE candidate parsed:`, {
+        callId,
+        groupId,
+        from: socket.userId,
+        to: targetUserId,
+        hasCandidate: !!candidate,
+      });
 
-      if (!callId || !groupId || !candidate) {
+      if (!callId || !groupId || !targetUserId || !candidate) {
         socket.emit("group-call-error", {
-          error: "Call ID, Group ID, and candidate are required",
+          error:
+            "Call ID, Group ID, target user ID, and candidate are required",
         });
         return;
       }
 
-      // If targetUserId is specified, send to that specific user
-      if (targetUserId) {
-        const targetSocketData = activeUsers.get(targetUserId);
-        if (targetSocketData) {
-          io.to(targetSocketData.socketId).emit("group-call-ice-candidate", {
-            callId,
-            groupId,
-            fromUserId: socket.userId,
-            candidate,
-            sdpMLineIndex,
-            sdpMid,
-          });
-        }
-      } else {
-        // If no targetUserId, broadcast to all group members except sender
-        const Group = require("./models/Group");
-        const group = await Group.findById(groupId).populate(
-          "members.user",
-          "name avatar email"
-        );
-
-        if (group) {
-          group.members.forEach((member) => {
-            if (member.user._id.toString() !== socket.userId) {
-              const memberSocketData = activeUsers.get(
-                member.user._id.toString()
-              );
-              if (memberSocketData) {
-                io.to(memberSocketData.socketId).emit(
-                  "group-call-ice-candidate",
-                  {
-                    callId,
-                    groupId,
-                    fromUserId: socket.userId,
-                    candidate,
-                    sdpMLineIndex,
-                    sdpMid,
-                  }
-                );
-              }
-            }
-          });
-        }
+      const targetSocketData = activeUsers.get(targetUserId);
+      if (targetSocketData) {
+        io.to(targetSocketData.socketId).emit("group-call-ice-candidate", {
+          callId,
+          groupId,
+          from: socket.user,
+          candidate,
+          sdpMLineIndex,
+          sdpMid,
+        });
       }
     } catch (error) {
       console.error("Group call ICE candidate error:", error);
       socket.emit("group-call-error", {
         error: "Failed to send group call ICE candidate",
       });
-    }
-  });
-
-  // ========================
-  // Group Audio over Socket fallback (PCM/Opus chunks relayed)
-  // ========================
-  socket.on("group-audio-chunk", async (data) => {
-    try {
-      const { callId, groupId, chunk, mimeType } = data || {};
-      if (!callId || !groupId || !chunk) {
-        return; // silently drop invalid packets
-      }
-
-      // Relay to all active participants except sender
-      const GroupCall = require("./models/GroupCall");
-      const groupCall = await GroupCall.findById(callId).populate(
-        "participants.user",
-        "_id"
-      );
-      if (!groupCall) return;
-
-      groupCall.participants.forEach((participant) => {
-        if (participant.isActive) {
-          const uid = participant.user._id.toString();
-          if (uid !== socket.userId) {
-            const target = activeUsers.get(uid);
-            if (target) {
-              io.to(target.socketId).emit("group-audio-chunk", {
-                callId,
-                groupId,
-                fromUserId: socket.userId,
-                chunk, // binary payload (ArrayBuffer)
-                mimeType: mimeType || "audio/webm;codecs=opus",
-              });
-            }
-          }
-        }
-      });
-    } catch (err) {
-      // Avoid noisy logs in production
-      if (process.env.DEBUG_GROUP_CALL === "1") {
-        console.error("group-audio-chunk relay error:", err.message);
-      }
     }
   });
 

@@ -25,27 +25,13 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
-// Initiate a new group call
-router.post("/initiate", authenticateToken, async (req, res) => {
+// Get group call history for a group
+router.get("/group/:groupId/history", authenticateToken, async (req, res) => {
   try {
-    const { groupId, callType = "voice" } = req.body;
-    const initiatorId = req.user.userId;
+    const { groupId } = req.params;
+    const { page = 1, limit = 20, callType, status } = req.query;
 
-    console.log("Group call initiate request:", {
-      groupId,
-      callType,
-      initiatorId,
-    });
-
-    // Validate required fields
-    if (!groupId) {
-      return res.status(400).json({
-        success: false,
-        message: "Group ID is required",
-      });
-    }
-
-    // Validate group exists and user is a member
+    // Verify user is member of the group
     const group = await Group.findById(groupId);
     if (!group) {
       return res.status(404).json({
@@ -54,53 +40,186 @@ router.post("/initiate", authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if user is a member of the group
     const isMember = group.members.some(
-      (member) => member.user.toString() === initiatorId
+      (member) => member.user.toString() === req.user.userId
     );
+
     if (!isMember) {
       return res.status(403).json({
         success: false,
-        message: "You are not a member of this group",
+        message: "Not authorized to view group call history",
       });
     }
 
-    // Check if there's already an active call for this group
-    const existingCall = await GroupCall.findOne({
-      group: groupId,
-      status: { $in: ["initiated", "active"] },
+    // Build query
+    const query = { group: groupId };
+
+    if (callType) {
+      query.callType = callType;
+    }
+
+    if (status) {
+      query.status = status;
+    }
+
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+
+    // Fetch group calls with pagination
+    const groupCalls = await GroupCall.find(query)
+      .populate("group", "name avatar")
+      .populate("initiator", "name avatar email")
+      .populate("participants.user", "name avatar email")
+      .sort({ startTime: -1 })
+      .skip(skip)
+      .limit(parseInt(limit));
+
+    // Get total count for pagination
+    const totalCalls = await GroupCall.countDocuments(query);
+
+    // Transform calls to include user info
+    const transformedCalls = groupCalls.map((call) => {
+      const isInitiator = call.initiator._id.toString() === req.user.userId;
+      const activeParticipants = call.getActiveParticipants();
+
+      return {
+        _id: call._id,
+        callType: call.callType,
+        status: call.status,
+        startTime: call.startTime,
+        endTime: call.endTime,
+        duration: call.duration || call.calculatedDuration,
+        isInitiator: isInitiator,
+        group: {
+          _id: call.group._id,
+          name: call.group.name,
+          avatar: call.group.avatar,
+        },
+        initiator: {
+          _id: call.initiator._id,
+          name: call.initiator.name,
+          avatar: call.initiator.avatar,
+          email: call.initiator.email,
+        },
+        participants: call.participants.map((participant) => ({
+          _id: participant.user._id,
+          name: participant.user.name,
+          avatar: participant.user.avatar,
+          email: participant.user.email,
+          joinedAt: participant.joinedAt,
+          isActive: participant.isActive,
+          isMuted: participant.isMuted,
+          isVideoEnabled: participant.isVideoEnabled,
+        })),
+        activeParticipantsCount: activeParticipants.length,
+        quality: call.quality,
+        notes: call.notes,
+        isRecorded: call.isRecorded,
+        recordingUrl: call.recordingUrl,
+      };
     });
 
-    if (existingCall) {
-      console.log("Existing call found:", existingCall._id);
-      return res.status(400).json({
-        success: false,
-        message: "There is already an active call for this group",
-        data: {
-          call: {
-            _id: existingCall._id,
-            callType: existingCall.callType,
-            status: existingCall.status,
-            roomName: existingCall.roomName,
-            participants: existingCall.participants.length,
-          },
+    res.json({
+      success: true,
+      data: {
+        calls: transformedCalls,
+        pagination: {
+          currentPage: parseInt(page),
+          totalPages: Math.ceil(totalCalls / limit),
+          totalCalls,
+          hasNext: skip + groupCalls.length < totalCalls,
+          hasPrev: page > 1,
         },
-      });
-    }
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching group call history:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch group call history",
+    });
+  }
+});
 
-    // Create new group call
-    const groupCall = await GroupCall.createGroupCall(
-      groupId,
+// Test route for debugging
+router.get("/test", (req, res) => {
+  res.json({ success: true, message: "Group calls API is working" });
+});
+
+// Initiate a new group call
+router.post("/initiate", authenticateToken, async (req, res) => {
+  try {
+    console.log("📞 Group call initiate request:", req.body);
+    const { groupId, callType = "voice" } = req.body;
+    const initiatorId = req.user.userId;
+    console.log(
+      "📞 Initiator ID:",
       initiatorId,
+      "Group ID:",
+      groupId,
+      "Call Type:",
       callType
     );
 
-    console.log("Group call created:", groupCall._id);
+    // Validate group exists and user is member
+    const group = await Group.findById(groupId);
+    if (!group) {
+      return res.status(404).json({
+        success: false,
+        message: "Group not found",
+      });
+    }
+
+    const isMember = group.members.some(
+      (member) => member.user.toString() === initiatorId
+    );
+
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to initiate calls in this group",
+      });
+    }
+
+    // Create new group call record
+    console.log("📞 Creating GroupCall instance...");
+
+    // Generate unique room name
+    const timestamp = Date.now().toString().slice(-8);
+    const random = Math.random().toString(36).substr(2, 6);
+    const roomName = `group-call-${timestamp}-${random}`;
+
+    const groupCall = new GroupCall({
+      group: groupId,
+      initiator: initiatorId,
+      callType,
+      status: "initiated",
+      roomName: roomName,
+    });
+    console.log("📞 GroupCall created:", groupCall);
+
+    // Add initiator as first participant
+    console.log("📞 Adding initiator as participant...");
+    groupCall.participants.push({
+      user: initiatorId,
+      joinedAt: new Date(),
+      isActive: true,
+      isMuted: false,
+      isVideoEnabled: callType === "video",
+    });
+    console.log(
+      "📞 Participants after adding initiator:",
+      groupCall.participants
+    );
+
+    console.log("📞 Saving group call to database...");
+    await groupCall.save();
+    console.log("📞 Group call saved successfully:", groupCall._id);
 
     // Populate the call with user details
+    await groupCall.populate("group", "name avatar");
     await groupCall.populate("initiator", "name avatar email");
     await groupCall.populate("participants.user", "name avatar email");
-    await groupCall.populate("group", "name");
 
     res.json({
       success: true,
@@ -109,32 +228,53 @@ router.post("/initiate", authenticateToken, async (req, res) => {
           _id: groupCall._id,
           callType: groupCall.callType,
           status: groupCall.status,
-          roomName: groupCall.roomName,
           startTime: groupCall.startTime,
-          group: groupCall.group,
-          initiator: groupCall.initiator,
-          participants: groupCall.participants,
-          maxParticipants: groupCall.maxParticipants,
+          isInitiator: true,
+          group: {
+            _id: groupCall.group._id,
+            name: groupCall.group.name,
+            avatar: groupCall.group.avatar,
+          },
+          initiator: {
+            _id: groupCall.initiator._id,
+            name: groupCall.initiator.name,
+            avatar: groupCall.initiator.avatar,
+            email: groupCall.initiator.email,
+          },
+          participants: groupCall.participants.map((participant) => ({
+            _id: participant.user._id,
+            name: participant.user.name,
+            avatar: participant.user.avatar,
+            email: participant.user.email,
+            joinedAt: participant.joinedAt,
+            isActive: participant.isActive,
+            isMuted: participant.isMuted,
+            isVideoEnabled: participant.isVideoEnabled,
+          })),
         },
       },
     });
   } catch (error) {
-    console.error("Error initiating group call:", error);
+    console.error("❌ Error initiating group call:", error);
+    console.error("❌ Error stack:", error.stack);
+    console.error("❌ Error message:", error.message);
     res.status(500).json({
       success: false,
       message: "Failed to initiate group call",
+      error: error.message,
     });
   }
 });
 
-// Join an existing group call
+// Join a group call
 router.post("/:callId/join", authenticateToken, async (req, res) => {
   try {
     const { callId } = req.params;
     const userId = req.user.userId;
 
     const groupCall = await GroupCall.findById(callId)
-      .populate("group", "name members")
+      .populate("group", "name avatar")
+      .populate("initiator", "name avatar email")
       .populate("participants.user", "name avatar email");
 
     if (!groupCall) {
@@ -144,36 +284,44 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
       });
     }
 
+    // Verify user is member of the group
+    const group = await Group.findById(groupCall.group._id);
+    const isMember = group.members.some(
+      (member) => member.user.toString() === userId
+    );
+
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to join this group call",
+      });
+    }
+
     // Check if call is still active
     if (groupCall.status !== "initiated" && groupCall.status !== "active") {
       return res.status(400).json({
         success: false,
-        message: "Call is no longer active",
+        message: "Group call is no longer active",
       });
     }
 
-    // Check if user is a member of the group
-    const isMember = groupCall.group.members.some(
-      (member) => member.user.toString() === userId
+    // Add participant to the call
+    const existingParticipant = groupCall.participants.find(
+      (p) => p.user.toString() === userId
     );
-    if (!isMember) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not a member of this group",
-      });
-    }
 
-    // Check if call is full
-    const activeParticipants = groupCall.getActiveParticipants();
-    if (activeParticipants.length >= groupCall.maxParticipants) {
-      return res.status(400).json({
-        success: false,
-        message: "Call is full",
+    if (!existingParticipant) {
+      groupCall.participants.push({
+        user: userId,
+        joinedAt: new Date(),
+        isActive: true,
+        isMuted: false,
+        isVideoEnabled: groupCall.callType === "video",
       });
+    } else {
+      existingParticipant.isActive = true;
+      existingParticipant.joinedAt = new Date();
     }
-
-    // Add participant to call
-    await groupCall.addParticipant(userId);
 
     // Update call status to active if it was just initiated
     if (groupCall.status === "initiated") {
@@ -181,7 +329,7 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
       await groupCall.save();
     }
 
-    // Populate with latest data
+    // Re-populate after adding participant
     await groupCall.populate("participants.user", "name avatar email");
 
     res.json({
@@ -191,9 +339,28 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
           _id: groupCall._id,
           callType: groupCall.callType,
           status: groupCall.status,
-          roomName: groupCall.roomName,
-          participants: groupCall.participants,
-          activeParticipantsCount: groupCall.activeParticipantsCount,
+          startTime: groupCall.startTime,
+          group: {
+            _id: groupCall.group._id,
+            name: groupCall.group.name,
+            avatar: groupCall.group.avatar,
+          },
+          initiator: {
+            _id: groupCall.initiator._id,
+            name: groupCall.initiator.name,
+            avatar: groupCall.initiator.avatar,
+            email: groupCall.initiator.email,
+          },
+          participants: groupCall.participants.map((participant) => ({
+            _id: participant.user._id,
+            name: participant.user.name,
+            avatar: participant.user.avatar,
+            email: participant.user.email,
+            joinedAt: participant.joinedAt,
+            isActive: participant.isActive,
+            isMuted: participant.isMuted,
+            isVideoEnabled: participant.isVideoEnabled,
+          })),
         },
       },
     });
@@ -220,21 +387,15 @@ router.post("/:callId/leave", authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if user is in the call
-    if (!groupCall.isUserInCall(userId)) {
-      return res.status(400).json({
-        success: false,
-        message: "You are not in this call",
-      });
-    }
+    // Check if user is the initiator
+    const isInitiator = groupCall.initiator.toString() === userId;
 
-    // Remove participant from call
-    await groupCall.removeParticipant(userId);
-
-    // Check if call should end (no active participants left)
-    const activeParticipants = groupCall.getActiveParticipants();
-    if (activeParticipants.length === 0) {
+    if (isInitiator) {
+      // If initiator leaves, end the call for everyone
       await groupCall.endCall();
+    } else {
+      // Regular participant leaving
+      await groupCall.removeParticipant(userId);
     }
 
     res.json({
@@ -243,8 +404,10 @@ router.post("/:callId/leave", authenticateToken, async (req, res) => {
         call: {
           _id: groupCall._id,
           status: groupCall.status,
-          activeParticipantsCount: groupCall.activeParticipantsCount,
+          endTime: groupCall.endTime,
+          duration: groupCall.duration,
         },
+        ended: isInitiator,
       },
     });
   } catch (error) {
@@ -256,7 +419,7 @@ router.post("/:callId/leave", authenticateToken, async (req, res) => {
   }
 });
 
-// End a group call (host only)
+// End a group call
 router.post("/:callId/end", authenticateToken, async (req, res) => {
   try {
     const { callId } = req.params;
@@ -270,11 +433,19 @@ router.post("/:callId/end", authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if user is the host
-    if (!groupCall.isUserHost(userId)) {
+    // Check if user is the initiator or admin
+    const isInitiator = groupCall.initiator.toString() === userId;
+
+    // Check if user is group admin
+    const group = await Group.findById(groupCall.group);
+    const isAdmin = group.members.some(
+      (member) => member.user.toString() === userId && member.role === "admin"
+    );
+
+    if (!isInitiator && !isAdmin) {
       return res.status(403).json({
         success: false,
-        message: "Only the call host can end the call",
+        message: "Not authorized to end this group call",
       });
     }
 
@@ -301,242 +472,16 @@ router.post("/:callId/end", authenticateToken, async (req, res) => {
   }
 });
 
-// Update participant status (mute, video, etc.)
-router.put(
-  "/:callId/participant/:userId/status",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const { callId, userId } = req.params;
-      const { isMuted, isVideoEnabled } = req.body;
-      const currentUserId = req.user.userId;
-
-      const groupCall = await GroupCall.findById(callId);
-      if (!groupCall) {
-        return res.status(404).json({
-          success: false,
-          message: "Group call not found",
-        });
-      }
-
-      console.log(`🔍 Update participant status request:`, {
-        callId,
-        userId,
-        currentUserId,
-        isMuted,
-        isVideoEnabled,
-      });
-
-      // Check if current user is in the call
-      const isUserInCall = groupCall.isUserInCall(currentUserId);
-      console.log(`👤 User ${currentUserId} is in call:`, isUserInCall);
-
-      if (!isUserInCall) {
-        return res.status(403).json({
-          success: false,
-          message: "You are not in this call",
-        });
-      }
-
-      // Users can only update their own status, or host can update anyone's
-      const isUserHost = groupCall.isUserHost(currentUserId);
-      const isUpdatingSelf = currentUserId === userId;
-      console.log(`👑 User ${currentUserId} is host:`, isUserHost);
-      console.log(`🔄 User updating self:`, isUpdatingSelf);
-
-      if (!isUpdatingSelf && !isUserHost) {
-        return res.status(403).json({
-          success: false,
-          message: "You can only update your own status",
-        });
-      }
-
-      // Update participant status
-      const updates = {};
-      if (typeof isMuted === "boolean") updates.isMuted = isMuted;
-      if (typeof isVideoEnabled === "boolean")
-        updates.isVideoEnabled = isVideoEnabled;
-
-      await groupCall.updateParticipantStatus(userId, updates);
-
-      res.json({
-        success: true,
-        data: {
-          call: {
-            _id: groupCall._id,
-            participants: groupCall.participants,
-          },
-        },
-      });
-    } catch (error) {
-      console.error("Error updating participant status:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to update participant status",
-      });
-    }
-  }
-);
-
-// Remove participant from group call (host only)
-router.delete(
-  "/:callId/participant/:userId",
-  authenticateToken,
-  async (req, res) => {
-    try {
-      const { callId, userId } = req.params;
-      const currentUserId = req.user.userId;
-
-      const groupCall = await GroupCall.findById(callId);
-      if (!groupCall) {
-        return res.status(404).json({
-          success: false,
-          message: "Group call not found",
-        });
-      }
-
-      // Check if current user is the host
-      if (!groupCall.isUserHost(currentUserId)) {
-        return res.status(403).json({
-          success: false,
-          message: "Only the call host can remove participants",
-        });
-      }
-
-      // Check if target user is in the call
-      if (!groupCall.isUserInCall(userId)) {
-        return res.status(400).json({
-          success: false,
-          message: "User is not in this call",
-        });
-      }
-
-      // Remove participant from call
-      await groupCall.removeParticipant(userId);
-
-      res.json({
-        success: true,
-        data: {
-          call: {
-            _id: groupCall._id,
-            activeParticipantsCount: groupCall.activeParticipantsCount,
-          },
-        },
-      });
-    } catch (error) {
-      console.error("Error removing participant:", error);
-      res.status(500).json({
-        success: false,
-        message: "Failed to remove participant",
-      });
-    }
-  }
-);
-
 // Get group call details
 router.get("/:callId", authenticateToken, async (req, res) => {
   try {
     const { callId } = req.params;
     const userId = req.user.userId;
 
-    console.log(
-      `🔍 Fetching group call details for callId: ${callId}, userId: ${userId}`
-    );
-
-    let groupCall;
-    try {
-      console.log(`🔍 Attempting to find group call with ID: ${callId}`);
-
-      // First try to find the group call without population
-      const basicGroupCall = await GroupCall.findById(callId);
-      console.log(`🔍 Basic group call found:`, basicGroupCall ? "Yes" : "No");
-
-      if (!basicGroupCall) {
-        return res.status(404).json({
-          success: false,
-          message: "Group call not found",
-        });
-      }
-
-      console.log(`🔍 Group call data:`, {
-        id: basicGroupCall._id,
-        group: basicGroupCall.group,
-        initiator: basicGroupCall.initiator,
-        participantsCount: basicGroupCall.participants.length,
-      });
-
-      // Now try with population
-      groupCall = await GroupCall.findById(callId)
-        .populate("group", "name members")
-        .populate("initiator", "name avatar email")
-        .populate("participants.user", "name avatar email");
-
-      console.log(
-        `🔍 Group call with population found:`,
-        groupCall ? "Yes" : "No"
-      );
-    } catch (populateError) {
-      console.error("Population error:", populateError);
-      console.error("Population error details:", {
-        message: populateError.message,
-        stack: populateError.stack,
-        callId: callId,
-        name: populateError.name,
-        code: populateError.code,
-      });
-
-      // Fallback: try to get basic group call data without population
-      try {
-        console.log("🔄 Attempting fallback without population");
-        const fallbackGroupCall = await GroupCall.findById(callId);
-
-        if (!fallbackGroupCall) {
-          return res.status(404).json({
-            success: false,
-            message: "Group call not found",
-          });
-        }
-
-        // Return basic data without population
-        return res.json({
-          success: true,
-          data: {
-            call: {
-              _id: fallbackGroupCall._id,
-              callType: fallbackGroupCall.callType,
-              status: fallbackGroupCall.status,
-              roomName: fallbackGroupCall.roomName,
-              startTime: fallbackGroupCall.startTime,
-              endTime: fallbackGroupCall.endTime,
-              duration: fallbackGroupCall.duration,
-              group: fallbackGroupCall.group,
-              initiator: fallbackGroupCall.initiator,
-              participants: fallbackGroupCall.participants,
-              activeParticipantsCount:
-                fallbackGroupCall.activeParticipantsCount,
-              maxParticipants: fallbackGroupCall.maxParticipants,
-              quality: fallbackGroupCall.quality,
-              notes: fallbackGroupCall.notes,
-              isRecorded: fallbackGroupCall.isRecorded,
-              recordingUrl: fallbackGroupCall.recordingUrl,
-            },
-          },
-        });
-      } catch (fallbackError) {
-        console.error("Fallback error:", fallbackError);
-        return res.status(500).json({
-          success: false,
-          message: "Failed to fetch group call details",
-          error: populateError.message,
-          details: {
-            name: populateError.name,
-            code: populateError.code,
-          },
-        });
-      }
-    }
-
-    console.log(`📞 Group call found:`, groupCall ? "Yes" : "No");
+    const groupCall = await GroupCall.findById(callId)
+      .populate("group", "name avatar")
+      .populate("initiator", "name avatar email")
+      .populate("participants.user", "name avatar email");
 
     if (!groupCall) {
       return res.status(404).json({
@@ -545,19 +490,21 @@ router.get("/:callId", authenticateToken, async (req, res) => {
       });
     }
 
-    // Check if user is a member of the group
-    console.log(`👥 Group members:`, groupCall.group.members?.length || 0);
-    const isMember = groupCall.group.members.some(
+    // Verify user is member of the group
+    const group = await Group.findById(groupCall.group._id);
+    const isMember = group.members.some(
       (member) => member.user.toString() === userId
     );
-    console.log(`✅ User is member:`, isMember);
 
     if (!isMember) {
       return res.status(403).json({
         success: false,
-        message: "You are not a member of this group",
+        message: "Not authorized to view this group call",
       });
     }
+
+    const isInitiator = groupCall.initiator._id.toString() === userId;
+    const activeParticipants = groupCall.getActiveParticipants();
 
     res.json({
       success: true,
@@ -566,15 +513,32 @@ router.get("/:callId", authenticateToken, async (req, res) => {
           _id: groupCall._id,
           callType: groupCall.callType,
           status: groupCall.status,
-          roomName: groupCall.roomName,
           startTime: groupCall.startTime,
           endTime: groupCall.endTime,
-          duration: groupCall.duration,
-          group: groupCall.group,
-          initiator: groupCall.initiator,
-          participants: groupCall.participants,
-          activeParticipantsCount: groupCall.activeParticipantsCount,
-          maxParticipants: groupCall.maxParticipants,
+          duration: groupCall.duration || groupCall.calculatedDuration,
+          isInitiator: isInitiator,
+          group: {
+            _id: groupCall.group._id,
+            name: groupCall.group.name,
+            avatar: groupCall.group.avatar,
+          },
+          initiator: {
+            _id: groupCall.initiator._id,
+            name: groupCall.initiator.name,
+            avatar: groupCall.initiator.avatar,
+            email: groupCall.initiator.email,
+          },
+          participants: groupCall.participants.map((participant) => ({
+            _id: participant.user._id,
+            name: participant.user.name,
+            avatar: participant.user.avatar,
+            email: participant.user.email,
+            joinedAt: participant.joinedAt,
+            isActive: participant.isActive,
+            isMuted: participant.isMuted,
+            isVideoEnabled: participant.isVideoEnabled,
+          })),
+          activeParticipantsCount: activeParticipants.length,
           quality: groupCall.quality,
           notes: groupCall.notes,
           isRecorded: groupCall.isRecorded,
@@ -584,198 +548,180 @@ router.get("/:callId", authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching group call details:", error);
-    console.error("Error stack:", error.stack);
     res.status(500).json({
       success: false,
       message: "Failed to fetch group call details",
-      error: error.message,
     });
   }
 });
 
-// Get active group calls for a group
-router.get("/group/:groupId/active", authenticateToken, async (req, res) => {
+// Toggle participant mute
+router.put("/:callId/mute", authenticateToken, async (req, res) => {
   try {
-    const { groupId } = req.params;
+    const { callId } = req.params;
+    const { isMuted } = req.body;
     const userId = req.user.userId;
 
-    console.log("Getting active calls for group:", groupId, "user:", userId);
-
-    // Validate group exists and user is a member
-    const group = await Group.findById(groupId);
-    if (!group) {
+    const groupCall = await GroupCall.findById(callId);
+    if (!groupCall) {
       return res.status(404).json({
         success: false,
-        message: "Group not found",
+        message: "Group call not found",
       });
     }
 
-    const isMember = group.members.some(
-      (member) => member.user.toString() === userId
-    );
-    if (!isMember) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not a member of this group",
-      });
-    }
-
-    // Find active calls for this group
-    const activeCalls = await GroupCall.find({
-      group: groupId,
-      status: { $in: ["initiated", "active"] },
-    })
-      .populate("initiator", "name avatar email")
-      .populate("participants.user", "name avatar email")
-      .sort({ startTime: -1 });
-
-    console.log("Found active calls:", activeCalls.length);
+    await groupCall.toggleParticipantMute(userId, isMuted);
 
     res.json({
       success: true,
       data: {
-        calls: activeCalls.map((call) => ({
-          _id: call._id,
-          callType: call.callType,
-          status: call.status,
-          roomName: call.roomName,
-          startTime: call.startTime,
-          initiator: call.initiator,
-          participants: call.participants,
-          activeParticipantsCount: call.activeParticipantsCount,
-          maxParticipants: call.maxParticipants,
-        })),
-      },
-    });
-  } catch (error) {
-    console.error("Error fetching active group calls:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch active group calls",
-    });
-  }
-});
-
-// Get group call history for a group
-router.get("/group/:groupId/history", authenticateToken, async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { page = 1, limit = 20 } = req.query;
-    const userId = req.user.userId;
-
-    // Validate group exists and user is a member
-    const group = await Group.findById(groupId);
-    if (!group) {
-      return res.status(404).json({
-        success: false,
-        message: "Group not found",
-      });
-    }
-
-    const isMember = group.members.some(
-      (member) => member.user.toString() === userId
-    );
-    if (!isMember) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not a member of this group",
-      });
-    }
-
-    // Calculate pagination
-    const skip = (page - 1) * limit;
-
-    // Find ended calls for this group
-    const calls = await GroupCall.find({
-      group: groupId,
-      status: "ended",
-    })
-      .populate("initiator", "name avatar email")
-      .populate("participants.user", "name avatar email")
-      .sort({ endTime: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    // Get total count for pagination
-    const totalCalls = await GroupCall.countDocuments({
-      group: groupId,
-      status: "ended",
-    });
-
-    res.json({
-      success: true,
-      data: {
-        calls: calls.map((call) => ({
-          _id: call._id,
-          callType: call.callType,
-          status: call.status,
-          startTime: call.startTime,
-          endTime: call.endTime,
-          duration: call.duration,
-          initiator: call.initiator,
-          participants: call.participants,
-          quality: call.quality,
-          notes: call.notes,
-          isRecorded: call.isRecorded,
-          recordingUrl: call.recordingUrl,
-        })),
-        pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(totalCalls / limit),
-          totalCalls,
-          hasNext: skip + calls.length < totalCalls,
-          hasPrev: page > 1,
+        call: {
+          _id: groupCall._id,
+          participant: {
+            userId: userId,
+            isMuted: isMuted,
+          },
         },
       },
     });
   } catch (error) {
-    console.error("Error fetching group call history:", error);
+    console.error("Error toggling mute:", error);
     res.status(500).json({
       success: false,
-      message: "Failed to fetch group call history",
+      message: "Failed to toggle mute",
     });
   }
 });
 
-// Test route to verify the group calls API is working
-router.get("/test", authenticateToken, (req, res) => {
-  res.json({
-    success: true,
-    message: "Group calls API is working",
-    user: req.user.userId,
-  });
-});
-
-// Debug route to end all active calls (for testing)
-router.post("/debug/end-all-active", authenticateToken, async (req, res) => {
+// Toggle participant video
+router.put("/:callId/video", authenticateToken, async (req, res) => {
   try {
-    const activeCalls = await GroupCall.find({
-      status: { $in: ["initiated", "active"] },
-    });
+    const { callId } = req.params;
+    const { isVideoEnabled } = req.body;
+    const userId = req.user.userId;
 
-    console.log("Found active calls to end:", activeCalls.length);
-
-    for (const call of activeCalls) {
-      await call.endCall();
-      console.log("Ended call:", call._id);
+    const groupCall = await GroupCall.findById(callId);
+    if (!groupCall) {
+      return res.status(404).json({
+        success: false,
+        message: "Group call not found",
+      });
     }
+
+    await groupCall.toggleParticipantVideo(userId, isVideoEnabled);
 
     res.json({
       success: true,
-      message: `Ended ${activeCalls.length} active calls`,
       data: {
-        endedCalls: activeCalls.map((call) => ({
-          _id: call._id,
-          group: call.group,
-          status: call.status,
-        })),
+        call: {
+          _id: groupCall._id,
+          participant: {
+            userId: userId,
+            isVideoEnabled: isVideoEnabled,
+          },
+        },
       },
     });
   } catch (error) {
-    console.error("Error ending active calls:", error);
+    console.error("Error toggling video:", error);
     res.status(500).json({
       success: false,
-      message: "Failed to end active calls",
+      message: "Failed to toggle video",
+    });
+  }
+});
+
+// Update group call notes
+router.put("/:callId/notes", authenticateToken, async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const { notes } = req.body;
+    const userId = req.user.userId;
+
+    const groupCall = await GroupCall.findById(callId);
+    if (!groupCall) {
+      return res.status(404).json({
+        success: false,
+        message: "Group call not found",
+      });
+    }
+
+    // Check if user is the initiator or admin
+    const isInitiator = groupCall.initiator.toString() === userId;
+
+    const group = await Group.findById(groupCall.group);
+    const isAdmin = group.members.some(
+      (member) => member.user.toString() === userId && member.role === "admin"
+    );
+
+    if (!isInitiator && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to update this group call",
+      });
+    }
+
+    groupCall.notes = notes || "";
+    await groupCall.save();
+
+    res.json({
+      success: true,
+      data: {
+        call: {
+          _id: groupCall._id,
+          notes: groupCall.notes,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error updating group call notes:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update group call notes",
+    });
+  }
+});
+
+// Delete group call history
+router.delete("/:callId", authenticateToken, async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const userId = req.user.userId;
+
+    const groupCall = await GroupCall.findById(callId);
+    if (!groupCall) {
+      return res.status(404).json({
+        success: false,
+        message: "Group call not found",
+      });
+    }
+
+    // Check if user is the initiator or admin
+    const isInitiator = groupCall.initiator.toString() === userId;
+
+    const group = await Group.findById(groupCall.group);
+    const isAdmin = group.members.some(
+      (member) => member.user.toString() === userId && member.role === "admin"
+    );
+
+    if (!isInitiator && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to delete this group call",
+      });
+    }
+
+    await GroupCall.findByIdAndDelete(callId);
+
+    res.json({
+      success: true,
+      message: "Group call deleted successfully",
+    });
+  } catch (error) {
+    console.error("Error deleting group call:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete group call",
     });
   }
 });

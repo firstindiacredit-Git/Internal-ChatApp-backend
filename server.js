@@ -8,6 +8,7 @@ const path = require("path");
 const jwt = require("jsonwebtoken");
 const User = require("./models/User");
 const Call = require("./models/Call");
+const GroupCall = require("./models/GroupCall");
 
 const app = express();
 const server = http.createServer(app);

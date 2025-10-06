@@ -44,6 +44,8 @@ app.use("/api/group-calls", require("./routes/groupCalls"));
 
 // Authenticate socket connections with JWT and track active users
 const activeUsers = new Map();
+// Dedup keys for noisy group-call logs (offer)
+const seenGroupOfferLogs = new Set();
 
 io.use(async (socket, next) => {
   try {
@@ -912,12 +914,20 @@ io.on("connection", (socket) => {
   socket.on("group-call-offer", async (data) => {
     try {
       const { callId, groupId, targetUserId, offer } = data || {};
-      console.log(`📞 Group call offer:`, {
-        callId,
-        groupId,
-        from: socket.userId,
-        to: targetUserId,
-      });
+      if (process.env.DEBUG_GROUP_CALL === "1") {
+        const key = `${callId || "no-call"}:${socket.userId || "no-user"}:${
+          targetUserId || "broadcast"
+        }`;
+        if (!seenGroupOfferLogs.has(key)) {
+          console.log(`📞 Group call offer`, {
+            callId,
+            groupId,
+            from: socket.userId,
+            to: targetUserId,
+          });
+          seenGroupOfferLogs.add(key);
+        }
+      }
 
       if (!callId || !groupId || !targetUserId || !offer) {
         socket.emit("group-call-error", {
@@ -946,12 +956,15 @@ io.on("connection", (socket) => {
   socket.on("group-call-answer", async (data) => {
     try {
       const { callId, groupId, targetUserId, answer } = data || {};
-      console.log(`📞 Group call answer:`, {
-        callId,
-        groupId,
-        from: socket.userId,
-        to: targetUserId,
-      });
+      // Silence repeated logs by default; opt-in with DEBUG_GROUP_CALL
+      if (process.env.DEBUG_GROUP_CALL === "1") {
+        console.log(`📞 Group call answer`, {
+          callId,
+          groupId,
+          from: socket.userId,
+          to: targetUserId,
+        });
+      }
 
       if (!callId || !groupId || !targetUserId || !answer) {
         socket.emit("group-call-error", {
@@ -979,7 +992,6 @@ io.on("connection", (socket) => {
 
   socket.on("group-call-ice-candidate", async (data) => {
     try {
-      console.log(`📞 Group call ICE candidate received:`, data);
       const {
         callId,
         groupId,
@@ -988,13 +1000,17 @@ io.on("connection", (socket) => {
         sdpMLineIndex,
         sdpMid,
       } = data || {};
-      console.log(`📞 Group call ICE candidate parsed:`, {
-        callId,
-        groupId,
-        from: socket.userId,
-        to: targetUserId,
-        hasCandidate: !!candidate,
-      });
+      if (process.env.DEBUG_GROUP_CALL === "1") {
+        console.log(`🧊 Group call ICE candidate`, {
+          callId,
+          groupId,
+          from: socket.userId,
+          to: targetUserId,
+          hasCandidate: !!candidate,
+          sdpMid,
+          sdpMLineIndex,
+        });
+      }
 
       if (!callId || !groupId || !candidate) {
         socket.emit("group-call-error", {
@@ -1052,6 +1068,49 @@ io.on("connection", (socket) => {
       socket.emit("group-call-error", {
         error: "Failed to send group call ICE candidate",
       });
+    }
+  });
+
+  // ========================
+  // Group Audio over Socket fallback (PCM/Opus chunks relayed)
+  // ========================
+  socket.on("group-audio-chunk", async (data) => {
+    try {
+      const { callId, groupId, chunk, mimeType } = data || {};
+      if (!callId || !groupId || !chunk) {
+        return; // silently drop invalid packets
+      }
+
+      // Relay to all active participants except sender
+      const GroupCall = require("./models/GroupCall");
+      const groupCall = await GroupCall.findById(callId).populate(
+        "participants.user",
+        "_id"
+      );
+      if (!groupCall) return;
+
+      groupCall.participants.forEach((participant) => {
+        if (participant.isActive) {
+          const uid = participant.user._id.toString();
+          if (uid !== socket.userId) {
+            const target = activeUsers.get(uid);
+            if (target) {
+              io.to(target.socketId).emit("group-audio-chunk", {
+                callId,
+                groupId,
+                fromUserId: socket.userId,
+                chunk, // binary payload (ArrayBuffer)
+                mimeType: mimeType || "audio/webm;codecs=opus",
+              });
+            }
+          }
+        }
+      });
+    } catch (err) {
+      // Avoid noisy logs in production
+      if (process.env.DEBUG_GROUP_CALL === "1") {
+        console.error("group-audio-chunk relay error:", err.message);
+      }
     }
   });
 

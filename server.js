@@ -673,13 +673,54 @@ io.on("connection", (socket) => {
             }
           }
         });
+
+        // Also emit the full active participants list to all current participants
+        const participantsPayload = (groupCall.participants || [])
+          .filter((p) => p.isActive && p.user)
+          .map((p) => ({
+            id: p.user._id.toString(),
+            name: p.user.name,
+            email: p.user.email,
+            avatar: p.user.avatar || p.user.profileImage || null,
+            isActive: true,
+          }));
+
+        groupCall.participants.forEach((participant) => {
+          if (participant.isActive) {
+            const participantSocketData = activeUsers.get(
+              participant.user._id.toString()
+            );
+            if (participantSocketData) {
+              io.to(participantSocketData.socketId).emit(
+                "group-call-participants",
+                {
+                  callId,
+                  groupId,
+                  participants: participantsPayload,
+                }
+              );
+            }
+          }
+        });
       }
 
-      // Confirm join to the user
+      // Confirm join to the user with current active participants
+      const participantsPayload = (groupCall?.participants || [])
+        .filter((p) => p.isActive && p.user)
+        .map((p) => ({
+          id:
+            p.user._id?.toString?.() || p.user?.toString?.() || String(p.user),
+          name: p.user.name,
+          email: p.user.email,
+          avatar: p.user.avatar || p.user.profileImage || null,
+          isActive: !!p.isActive,
+        }));
+
       socket.emit("group-call-joined", {
         callId,
         groupId,
         participant: socket.user,
+        participants: participantsPayload,
       });
     } catch (error) {
       console.error("Group call join error:", error);
@@ -763,6 +804,41 @@ io.on("connection", (socket) => {
                     callId,
                     groupId,
                     leftParticipant: socket.user,
+                  }
+                );
+              }
+            }
+          });
+
+          // Recompute and emit the full active participants list after leave
+          const participantsPayload = (groupCall.participants || [])
+            .filter(
+              (p) =>
+                p.isActive && p.user && p.user._id.toString() !== socket.userId
+            )
+            .map((p) => ({
+              id: p.user._id.toString(),
+              name: p.user.name,
+              email: p.user.email,
+              avatar: p.user.avatar || p.user.profileImage || null,
+              isActive: true,
+            }));
+
+          groupCall.participants.forEach((participant) => {
+            if (
+              participant.user._id.toString() !== socket.userId &&
+              participant.isActive
+            ) {
+              const participantSocketData = activeUsers.get(
+                participant.user._id.toString()
+              );
+              if (participantSocketData) {
+                io.to(participantSocketData.socketId).emit(
+                  "group-call-participants",
+                  {
+                    callId,
+                    groupId,
+                    participants: participantsPayload,
                   }
                 );
               }
@@ -920,24 +996,56 @@ io.on("connection", (socket) => {
         hasCandidate: !!candidate,
       });
 
-      if (!callId || !groupId || !targetUserId || !candidate) {
+      if (!callId || !groupId || !candidate) {
         socket.emit("group-call-error", {
-          error:
-            "Call ID, Group ID, target user ID, and candidate are required",
+          error: "Call ID, Group ID, and candidate are required",
         });
         return;
       }
 
-      const targetSocketData = activeUsers.get(targetUserId);
-      if (targetSocketData) {
-        io.to(targetSocketData.socketId).emit("group-call-ice-candidate", {
-          callId,
-          groupId,
-          from: socket.user,
-          candidate,
-          sdpMLineIndex,
-          sdpMid,
-        });
+      // If targetUserId is specified, send to that specific user
+      if (targetUserId) {
+        const targetSocketData = activeUsers.get(targetUserId);
+        if (targetSocketData) {
+          io.to(targetSocketData.socketId).emit("group-call-ice-candidate", {
+            callId,
+            groupId,
+            fromUserId: socket.userId,
+            candidate,
+            sdpMLineIndex,
+            sdpMid,
+          });
+        }
+      } else {
+        // If no targetUserId, broadcast to all group members except sender
+        const Group = require("./models/Group");
+        const group = await Group.findById(groupId).populate(
+          "members.user",
+          "name avatar email"
+        );
+
+        if (group) {
+          group.members.forEach((member) => {
+            if (member.user._id.toString() !== socket.userId) {
+              const memberSocketData = activeUsers.get(
+                member.user._id.toString()
+              );
+              if (memberSocketData) {
+                io.to(memberSocketData.socketId).emit(
+                  "group-call-ice-candidate",
+                  {
+                    callId,
+                    groupId,
+                    fromUserId: socket.userId,
+                    candidate,
+                    sdpMLineIndex,
+                    sdpMid,
+                  }
+                );
+              }
+            }
+          });
+        }
       }
     } catch (error) {
       console.error("Group call ICE candidate error:", error);

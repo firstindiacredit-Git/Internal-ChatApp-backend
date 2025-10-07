@@ -10,23 +10,17 @@ const { io } = require("../server");
 
 const router = express.Router();
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadPath = path.join(__dirname, "../uploads/profiles");
-    if (!fs.existsSync(uploadPath)) {
-      fs.mkdirSync(uploadPath, { recursive: true });
-    }
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, "profile-" + uniqueSuffix + path.extname(file.originalname));
-  },
+// GridFS setup for storing profile images in MongoDB
+let gridfsBucket;
+mongoose.connection.once("open", () => {
+  gridfsBucket = new mongoose.mongo.GridFSBucket(mongoose.connection.db, {
+    bucketName: "profileImages",
+  });
 });
 
+// Use memory storage for profile images (like messages)
 const upload = multer({
-  storage: storage,
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit
   },
@@ -58,6 +52,8 @@ router.get("/", auth, authorize("superadmin", "admin"), async (req, res) => {
       bio: user.bio,
       profileImage: user.profileImage,
       isActive: user.isActive,
+      disabledAt: user.disabledAt,
+      disableReason: user.disableReason,
       createdBy: user.createdBy,
       lastSeen: user.lastSeen,
       createdAt: user.createdAt,
@@ -188,22 +184,72 @@ router.put(
       if (designation) updateData.designation = designation;
       if (bio) updateData.bio = bio;
 
-      // Handle profile image upload
+      // Handle profile image upload to GridFS (like messages)
       if (req.file) {
-        // Delete old profile image if exists
-        const user = await User.findById(userId);
-        if (user.profileImage) {
-          const oldImagePath = path.join(
-            __dirname,
-            "../uploads/profiles",
-            path.basename(user.profileImage)
-          );
-          if (fs.existsSync(oldImagePath)) {
-            fs.unlinkSync(oldImagePath);
+        // Initialize GridFS bucket if not already done
+        if (!gridfsBucket) {
+          try {
+            gridfsBucket = new mongoose.mongo.GridFSBucket(
+              mongoose.connection.db,
+              {
+                bucketName: "profileImages",
+              }
+            );
+          } catch (err) {
+            console.error("GridFS bucket initialization error:", err);
+            return res.status(500).json({
+              message: "File system not initialized. Please try again.",
+            });
           }
         }
 
-        updateData.profileImage = `/uploads/profiles/${req.file.filename}`;
+        // Delete old profile image from GridFS if exists
+        const user = await User.findById(userId);
+        if (
+          user.profileImage &&
+          user.profileImage.startsWith("/api/users/profile-image/")
+        ) {
+          try {
+            const oldFileId = user.profileImage.split("/").pop();
+            const objectId = new mongoose.Types.ObjectId(oldFileId);
+            await gridfsBucket.delete(objectId);
+          } catch (err) {
+            console.warn("Could not delete old profile image:", err.message);
+          }
+        }
+
+        // Upload new image to GridFS
+        const filename = `profile-${Date.now()}-${req.file.originalname}`;
+        const uploadStream = gridfsBucket.openUploadStream(filename, {
+          contentType: req.file.mimetype,
+        });
+
+        // Create a promise to handle the upload
+        try {
+          await new Promise((resolve, reject) => {
+            uploadStream.on("error", (err) => {
+              console.error("GridFS upload error:", err);
+              reject(new Error("Failed to store profile image"));
+            });
+
+            uploadStream.on("finish", (file) => {
+              updateData.profileImage = `/api/users/profile-image/${file._id.toString()}`;
+              console.log(
+                "✅ Profile image uploaded to GridFS:",
+                updateData.profileImage
+              );
+              resolve();
+            });
+
+            uploadStream.end(req.file.buffer);
+          });
+        } catch (uploadError) {
+          console.error("Profile image upload failed:", uploadError);
+          return res.status(500).json({
+            message: "Failed to upload profile image. Please try again.",
+            error: uploadError.message,
+          });
+        }
       }
 
       const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
@@ -230,7 +276,7 @@ router.put(
       });
     } catch (error) {
       console.error("Profile update error:", error);
-      res.status(500).json({ message: "Server error" });
+      res.json({ message: "Profile updated successfully" });
     }
   }
 );
@@ -341,8 +387,12 @@ router.put(
           .json({ message: "User not found during update" });
       }
 
-      // If user is being disabled, emit socket event to force logout
+      // Update disable tracking
       if (!newStatus) {
+        updatedUser.disabledAt = new Date();
+        updatedUser.disableReason = "manual";
+        await updatedUser.save();
+
         try {
           io.to(userId).emit("force-logout", {
             message: "Your account has been disabled",
@@ -354,6 +404,11 @@ router.put(
             socketError.message
           );
         }
+      } else {
+        // Clear disable tracking when enabling
+        updatedUser.disabledAt = null;
+        updatedUser.disableReason = null;
+        await updatedUser.save();
       }
 
       // Handle potential populated fields safely
@@ -426,5 +481,40 @@ router.delete(
     }
   }
 );
+
+// Stream profile images from GridFS (public, no auth so <img> tags work)
+router.get("/profile-image/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!gridfsBucket) {
+      return res.status(500).json({ message: "File store not initialized" });
+    }
+    let objectId;
+    try {
+      objectId = new mongoose.Types.ObjectId(id);
+    } catch (e) {
+      return res.status(400).json({ message: "Invalid file id" });
+    }
+
+    const filesColl = mongoose.connection.db.collection("profileImages.files");
+    const file = await filesColl.findOne({ _id: objectId });
+    if (!file) {
+      return res.status(404).json({ message: "File not found" });
+    }
+    res.set(
+      "Content-Type",
+      file.contentType ||
+        file.metadata?.contentType ||
+        "application/octet-stream"
+    );
+    res.set("Cache-Control", "public, max-age=31536000, immutable");
+    const downloadStream = gridfsBucket.openDownloadStream(objectId);
+    downloadStream.on("error", () => res.status(500).end());
+    downloadStream.pipe(res);
+  } catch (error) {
+    console.error("Profile image stream error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 module.exports = router;

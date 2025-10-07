@@ -58,6 +58,15 @@ const userSchema = new mongoose.Schema(
       trim: true,
       maxlength: 500,
     },
+    disabledAt: {
+      type: Date,
+      default: null,
+    },
+    disableReason: {
+      type: String,
+      enum: ["manual", "auto", null],
+      default: null,
+    },
   },
   {
     timestamps: true,

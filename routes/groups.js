@@ -275,6 +275,10 @@ router.put(
   [
     body("name").optional().trim().isLength({ min: 2 }),
     body("description").optional().trim(),
+    body("members")
+      .optional()
+      .isArray()
+      .withMessage("Members must be an array"),
   ],
   async (req, res) => {
     try {
@@ -283,7 +287,7 @@ router.put(
         return res.status(400).json({ errors: errors.array() });
       }
 
-      const { name, description } = req.body;
+      const { name, description, members } = req.body;
       const groupId = req.params.id;
 
       const group = await Group.findById(groupId);
@@ -308,6 +312,39 @@ router.put(
       if (name) updateData.name = name;
       if (description !== undefined) updateData.description = description;
 
+      // Handle members update - no maximum limit
+      if (members && Array.isArray(members)) {
+        // Validate that all members exist and are active
+        const memberIds = members.map((member) => member.user);
+        const users = await User.find({
+          _id: { $in: memberIds },
+          isActive: true,
+        });
+
+        if (users.length !== memberIds.length) {
+          return res
+            .status(400)
+            .json({ message: "Some members are invalid or inactive" });
+        }
+
+        // Ensure the admin (creator) is always included
+        const hasAdmin = members.some(
+          (member) =>
+            member.user.toString() === req.user._id.toString() &&
+            member.role === "admin"
+        );
+
+        if (!hasAdmin) {
+          // Add the current admin if not present
+          members.unshift({
+            user: req.user._id,
+            role: "admin",
+          });
+        }
+
+        updateData.members = members;
+      }
+
       const updatedGroup = await Group.findByIdAndUpdate(groupId, updateData, {
         new: true,
         runValidators: true,
@@ -320,6 +357,7 @@ router.put(
         group: updatedGroup,
       });
     } catch (error) {
+      console.error("Group update error:", error);
       res.status(500).json({ message: "Server error" });
     }
   }

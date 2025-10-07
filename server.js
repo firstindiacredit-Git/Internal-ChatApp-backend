@@ -6,9 +6,14 @@ const socketIo = require("socket.io");
 require("dotenv").config({ path: "./config.env" });
 const path = require("path");
 const jwt = require("jsonwebtoken");
+const cron = require("node-cron");
+const moment = require("moment-timezone");
+const ntpClient = require("ntp-client");
 const User = require("./models/User");
 const Call = require("./models/Call");
 const GroupCall = require("./models/GroupCall");
+const TimeSettings = require("./models/TimeSettings");
+const ScheduledDisable = require("./models/ScheduledDisable");
 
 const app = express();
 const server = http.createServer(app);
@@ -21,8 +26,12 @@ const io = socketIo(server, {
   },
 });
 
-// Make io available to routes via req.app.get('io')
+// Make io and globalTimeOffset available to routes
 app.set("io", io);
+app.use((req, res, next) => {
+  req.app.set("globalTimeOffset", globalTimeOffset);
+  next();
+});
 
 // Middleware
 app.use(cors());
@@ -41,6 +50,8 @@ app.use("/api/groups", require("./routes/groups"));
 app.use("/api/messages", require("./routes/messages"));
 app.use("/api/calls", require("./routes/calls"));
 app.use("/api/group-calls", require("./routes/groupCalls"));
+app.use("/api/time-settings", require("./routes/timeSettings"));
+app.use("/api/scheduled-disable", require("./routes/scheduledDisable"));
 
 // Authenticate socket connections with JWT and track active users
 const activeUsers = new Map();
@@ -964,12 +975,286 @@ mongoose
     useNewUrlParser: true,
     useUnifiedTopology: true,
   })
-  .then(() => {
+  .then(async () => {
     console.log("Connected to MongoDB");
+
+    // Sync with NTP server first (get global time, not system time)
+    console.log("🌍 Syncing with global NTP time server...");
+    try {
+      await syncWithNTPServer();
+      console.log("✅ Global time synchronized");
+    } catch (error) {
+      console.warn("⚠️  NTP sync failed, using system time as fallback");
+    }
+
+    // Initialize auto-disable scheduler after DB connection and NTP sync
+    initializeAutoDisableScheduler();
+
+    // Re-sync with NTP server every 1 hour to maintain accuracy
+    setInterval(async () => {
+      console.log("🔄 Re-syncing with NTP server...");
+      try {
+        await syncWithNTPServer();
+      } catch (error) {
+        console.warn("⚠️  NTP re-sync failed, continuing with last offset");
+      }
+    }, 60 * 60 * 1000); // 1 hour
   })
   .catch((error) => {
     console.error("MongoDB connection error:", error);
   });
+
+// Global time offset from NTP server (in milliseconds)
+let globalTimeOffset = 0;
+let lastNTPSync = null;
+
+// Helper function to get global time from NTP server
+async function syncWithNTPServer() {
+  return new Promise((resolve, reject) => {
+    // Priority NTP servers list (AWS NTP server first for AWS deployments)
+    const ntpServers = [
+      "169.254.169.123", // AWS NTP server (works only on AWS EC2)
+      "time.google.com", // Google NTP server
+      "pool.ntp.org", // Public NTP pool
+    ];
+
+    let currentServerIndex = 0;
+
+    function tryNextServer() {
+      if (currentServerIndex >= ntpServers.length) {
+        console.error("❌ All NTP servers failed");
+        reject(new Error("All NTP servers failed"));
+        return;
+      }
+
+      const server = ntpServers[currentServerIndex];
+      const serverName =
+        server === "169.254.169.123"
+          ? "AWS NTP"
+          : server === "time.google.com"
+          ? "Google NTP"
+          : "Pool NTP";
+
+      console.log(`🔄 Trying ${serverName} server: ${server}`);
+
+      ntpClient.getNetworkTime(server, 123, (err, date) => {
+        if (err) {
+          console.warn(`⚠️  ${serverName} sync failed: ${err.message}`);
+          currentServerIndex++;
+          tryNextServer();
+        } else {
+          const systemTime = new Date();
+          globalTimeOffset = date.getTime() - systemTime.getTime();
+          lastNTPSync = date;
+          console.log(
+            `✅ NTP synced with ${serverName} (${server}) - Offset: ${globalTimeOffset}ms`
+          );
+          resolve(date);
+        }
+      });
+    }
+
+    tryNextServer();
+  });
+}
+
+// Helper function to get current IST time (using global NTP time, NOT system time)
+function getCurrentISTTime() {
+  // Get global time = system time + NTP offset
+  const globalTime = new Date(Date.now() + globalTimeOffset);
+  // Convert global time to IST
+  return moment(globalTime).tz("Asia/Kolkata");
+}
+
+// Initialize the scheduler
+async function initializeAutoDisableScheduler() {
+  try {
+    const istNow = getCurrentISTTime();
+    console.log(`⏰ User-specific auto-disable scheduler initialized`);
+    console.log(`   🌍 Using Global NTP Time (NOT system time)`);
+    console.log(`   📡 NTP Offset: ${globalTimeOffset}ms`);
+    console.log(
+      `   🇮🇳 Current IST Time: ${istNow.format("DD/MM/YYYY HH:mm:ss")}`
+    );
+    console.log(`   📅 Checking scheduled disables for specific users only`);
+
+    // Run every minute to check if it's time to enable/disable users (using IST)
+    cron.schedule("* * * * *", async () => {
+      const istNow = getCurrentISTTime();
+      const currentTime = istNow.format("HH:mm");
+      const currentDay = istNow.format("dddd"); // Monday, Tuesday, etc.
+      const currentDate = istNow.format("YYYY-MM-DD");
+
+      console.log(`⏰ Checking schedules at ${currentTime} on ${currentDay}`);
+
+      // Check user-specific schedules (enable and disable)
+      const activeSchedules = await ScheduledDisable.find({
+        isActive: true,
+        days: currentDay,
+        $or: [{ enableTime: currentTime }, { disableTime: currentTime }],
+      }).populate("users", "name email");
+
+      console.log(`📋 Found ${activeSchedules.length} matching schedule(s)`);
+
+      for (const schedule of activeSchedules) {
+        let actionTriggered = false;
+
+        // Check ENABLE time
+        if (schedule.enableTime && schedule.enableTime === currentTime) {
+          const lastTriggeredEnableDate = schedule.lastTriggeredEnable
+            ? moment(schedule.lastTriggeredEnable)
+                .tz("Asia/Kolkata")
+                .format("YYYY-MM-DD")
+            : null;
+
+          // Skip if already triggered enable today
+          if (lastTriggeredEnableDate !== currentDate) {
+            console.log(
+              `📅 Scheduled ENABLE triggered: "${schedule.name}" at ${currentTime}`
+            );
+            actionTriggered = true;
+
+            // ENABLE users
+            if (schedule.applyToAllUsers) {
+              // Enable all regular users
+              const result = await User.updateMany(
+                { role: "user", isActive: false },
+                {
+                  $set: {
+                    isActive: true,
+                    disabledAt: null,
+                    disableReason: null,
+                  },
+                }
+              );
+
+              console.log(
+                `✅ Enabled ${result.modifiedCount} users (All Users) via schedule: ${schedule.name}`
+              );
+            } else if (schedule.users && schedule.users.length > 0) {
+              // Enable specific users
+              const userIds = schedule.users.map((u) => u._id);
+              const result = await User.updateMany(
+                { _id: { $in: userIds }, isActive: false },
+                {
+                  $set: {
+                    isActive: true,
+                    disabledAt: null,
+                    disableReason: null,
+                  },
+                }
+              );
+
+              console.log(
+                `✅ Enabled ${result.modifiedCount} specific users via schedule: ${schedule.name}`
+              );
+            }
+
+            // Update last triggered enable time
+            schedule.lastTriggeredEnable = istNow.toDate();
+            await schedule.save();
+          }
+        }
+
+        // Check DISABLE time
+        if (schedule.disableTime && schedule.disableTime === currentTime) {
+          const lastTriggeredDisableDate = schedule.lastTriggeredDisable
+            ? moment(schedule.lastTriggeredDisable)
+                .tz("Asia/Kolkata")
+                .format("YYYY-MM-DD")
+            : null;
+
+          // Skip if already triggered disable today
+          if (lastTriggeredDisableDate !== currentDate) {
+            console.log(
+              `📅 Scheduled DISABLE triggered: "${schedule.name}" at ${currentTime}`
+            );
+
+            // DISABLE users
+            if (schedule.applyToAllUsers) {
+              // Disable all regular users
+              const result = await User.updateMany(
+                { role: "user", isActive: true },
+                {
+                  $set: {
+                    isActive: false,
+                    disabledAt: istNow.toDate(),
+                    disableReason: "auto",
+                  },
+                }
+              );
+
+              console.log(
+                `✅ Disabled ${result.modifiedCount} users (All Users) via schedule: ${schedule.name}`
+              );
+
+              // Force logout
+              const disabledUsers = await User.find({
+                role: "user",
+                isActive: false,
+                disableReason: "auto",
+              });
+
+              disabledUsers.forEach((user) => {
+                try {
+                  io.to(user._id.toString()).emit("force-logout", {
+                    message: `Your account has been automatically disabled (Schedule: ${schedule.name})`,
+                    reason: "scheduled_disable",
+                    scheduleName: schedule.name,
+                    disabledAt: istNow.toDate(),
+                  });
+                } catch (err) {
+                  console.log("Socket emit failed for user:", user._id);
+                }
+              });
+            } else if (schedule.users && schedule.users.length > 0) {
+              // Disable specific users
+              const userIds = schedule.users.map((u) => u._id);
+              const result = await User.updateMany(
+                { _id: { $in: userIds }, isActive: true },
+                {
+                  $set: {
+                    isActive: false,
+                    disabledAt: istNow.toDate(),
+                    disableReason: "auto",
+                  },
+                }
+              );
+
+              console.log(
+                `✅ Disabled ${result.modifiedCount} specific users via schedule: ${schedule.name}`
+              );
+
+              // Force logout specific users
+              schedule.users.forEach((user) => {
+                try {
+                  io.to(user._id.toString()).emit("force-logout", {
+                    message: `Your account has been automatically disabled (Schedule: ${schedule.name})`,
+                    reason: "scheduled_disable",
+                    scheduleName: schedule.name,
+                    disabledAt: istNow.toDate(),
+                  });
+                } catch (err) {
+                  console.log("Socket emit failed for user:", user._id);
+                }
+              });
+            }
+
+            // Update last triggered disable time
+            schedule.lastTriggeredDisable = istNow.toDate();
+            await schedule.save();
+          }
+        }
+      }
+    });
+
+    console.log(
+      "✅ User-specific disable scheduler started (using IST timezone)"
+    );
+  } catch (error) {
+    console.error("❌ Error initializing auto-disable scheduler:", error);
+  }
+}
 
 // Catch-all handler: send back React's index.html file for any non-API routes
 app.get("*", (req, res) => {

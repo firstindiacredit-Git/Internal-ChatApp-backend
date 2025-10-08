@@ -18,12 +18,20 @@ const ScheduledDisable = require("./models/ScheduledDisable");
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup
+// Increase server timeout for large file uploads (5 minutes)
+server.timeout = 5 * 60 * 1000; // 5 minutes
+server.keepAliveTimeout = 5 * 60 * 1000; // 5 minutes
+server.headersTimeout = 5 * 60 * 1000; // 5 minutes
+
+// Socket.io setup with increased buffer size for large files
 const io = socketIo(server, {
   cors: {
     origin: process.env.FRONTEND_URL || "http://localhost:3000",
     methods: ["GET", "POST"],
   },
+  maxHttpBufferSize: 100 * 1024 * 1024, // 100MB for large file support
+  pingTimeout: 60000, // 60 seconds
+  pingInterval: 25000, // 25 seconds
 });
 
 // Make io and globalTimeOffset available to routes
@@ -35,8 +43,8 @@ app.use((req, res, next) => {
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb", extended: true }));
+app.use(express.json({ limit: "100mb" })); // Increased to 100MB
+app.use(express.urlencoded({ limit: "100mb", extended: true })); // Increased to 100MB
 
 // Serve static files for profile images
 app.use("/uploads", express.static("uploads"));

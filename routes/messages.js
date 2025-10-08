@@ -10,9 +10,13 @@ const Message = require("../models/Message");
 const Group = require("../models/Group");
 const User = require("../models/User");
 const { auth } = require("../middleware/auth");
+const googleDriveService = require("../services/googleDrive");
 // io will be acquired from req.app.get('io') to avoid circular imports
 
 const router = express.Router();
+
+// File size threshold for Google Drive upload (10MB)
+const GOOGLE_DRIVE_THRESHOLD = 10 * 1024 * 1024; // 10MB
 
 // Check if Cloudinary is configured
 const isCloudinaryConfigured =
@@ -31,9 +35,167 @@ mongoose.connection.once("open", () => {
 // Use memory storage so we can route images to GridFS and others to cloud/local
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB limit
+    fieldSize: 100 * 1024 * 1024, // 100MB field size limit
+  },
   fileFilter: (req, file, cb) => cb(null, true),
 });
+
+// Helper function to handle file uploads with Google Drive for large files
+async function handleFileUpload(file) {
+  const fileData = {};
+
+  // Check if file is larger than 10MB - try Google Drive first, fallback to local
+  if (file.size > GOOGLE_DRIVE_THRESHOLD) {
+    console.log(
+      `📦 Large file detected (${(file.size / (1024 * 1024)).toFixed(
+        2
+      )}MB) - trying Google Drive...`
+    );
+
+    try {
+      // Check if Google Drive is configured
+      const serviceAccountPath = path.join(
+        __dirname,
+        "../google-service-account.json"
+      );
+      const hasServiceAccount = require("fs").existsSync(serviceAccountPath);
+      const hasOAuth = !!process.env.GOOGLE_REFRESH_TOKEN;
+
+      if (hasServiceAccount || hasOAuth) {
+        const driveResult = await googleDriveService.uploadFile(
+          file.buffer,
+          file.originalname,
+          file.mimetype
+        );
+
+        fileData.fileUrl = driveResult.directLink;
+        fileData.fileName = file.originalname;
+        fileData.fileSize = file.size;
+        fileData.fileType = file.mimetype;
+        fileData.isGoogleDrive = true;
+        fileData.googleDriveId = driveResult.fileId;
+        fileData.webViewLink = driveResult.webViewLink;
+
+        console.log(`✅ Large file uploaded to Google Drive successfully`);
+        return fileData;
+      } else {
+        console.log("⚠️ Google Drive not configured, using local storage...");
+        // Fall through to local storage
+      }
+    } catch (driveError) {
+      console.error("❌ Google Drive upload failed:", driveError.message);
+      console.log("⚠️ Falling back to local storage...");
+      // Fall through to local storage
+    }
+  }
+
+  // For small files or if Google Drive fails
+  const messageType = file.mimetype.startsWith("image/")
+    ? "image"
+    : file.mimetype.startsWith("video/")
+    ? "video"
+    : file.mimetype.startsWith("audio/")
+    ? "audio"
+    : "file";
+
+  if (messageType === "image" && file.size <= GOOGLE_DRIVE_THRESHOLD) {
+    // Small images: Save to MongoDB GridFS
+    return new Promise((resolve, reject) => {
+      if (!gridfsBucket) {
+        reject(new Error("File system not initialized"));
+        return;
+      }
+
+      const filename = `img-${Date.now()}-${file.originalname}`;
+      const uploadStream = gridfsBucket.openUploadStream(filename, {
+        contentType: file.mimetype,
+      });
+
+      uploadStream.on("error", (err) => {
+        console.error("GridFS upload error:", err);
+        reject(err);
+      });
+
+      uploadStream.on("finish", () => {
+        // uploadStream.id contains the file ID after upload
+        resolve({
+          fileUrl: `/api/messages/file/${uploadStream.id.toString()}`,
+          fileName: file.originalname,
+          fileSize: file.size,
+          fileType: file.mimetype,
+        });
+      });
+
+      // Write buffer to stream
+      uploadStream.end(file.buffer);
+    });
+  } else {
+    // Small files or fallback: Try Cloudinary first (but skip for large files due to 10MB limit), then local
+    // For large files that failed Google Drive, go straight to local storage
+    const shouldTryCloudinary =
+      isCloudinaryConfigured && file.size <= GOOGLE_DRIVE_THRESHOLD;
+
+    if (shouldTryCloudinary) {
+      try {
+        cloudinary.config({
+          cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+          api_key: process.env.CLOUDINARY_API_KEY,
+          api_secret: process.env.CLOUDINARY_API_SECRET,
+        });
+
+        const result = await new Promise((resolve, reject) => {
+          const cld = cloudinary.uploader.upload_stream(
+            { folder: "chat-messages", resource_type: "auto" },
+            (error, result) => {
+              if (error) return reject(error);
+              resolve(result);
+            }
+          );
+          cld.end(file.buffer);
+        });
+
+        return {
+          fileUrl: result.secure_url,
+          fileName: file.originalname,
+          fileSize: file.size,
+          fileType: file.mimetype,
+        };
+      } catch (cloudinaryError) {
+        console.log(
+          "⚠️ Cloudinary upload failed, using local storage:",
+          cloudinaryError.message
+        );
+        // Fall through to local storage
+      }
+    }
+
+    // Local filesystem storage (works for any size)
+    const uploadPath = path.join(__dirname, "../uploads/messages");
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    const fname = `message-${Date.now()}-${Math.round(
+      Math.random() * 1e9
+    )}${path.extname(file.originalname)}`;
+    const fullPath = path.join(uploadPath, fname);
+    fs.writeFileSync(fullPath, file.buffer);
+
+    console.log(
+      `✅ File saved locally: ${fname} (${(file.size / (1024 * 1024)).toFixed(
+        2
+      )}MB)`
+    );
+
+    return {
+      fileUrl: `/uploads/messages/${fname}`,
+      fileName: file.originalname,
+      fileSize: file.size,
+      fileType: file.mimetype,
+    };
+  }
+}
 
 // Get messages between two users
 router.get("/personal/:userId", auth, async (req, res) => {
@@ -194,101 +356,28 @@ router.post(
       }
 
       if (req.file) {
-        // File upload
-        finalMessageType = req.file.mimetype.startsWith("image/")
-          ? "image"
-          : req.file.mimetype.startsWith("video/")
-          ? "video"
-          : req.file.mimetype.startsWith("audio/")
-          ? "audio"
-          : "file";
+        // File upload - use helper function with Google Drive support
+        try {
+          fileData = await handleFileUpload(req.file);
 
-        if (finalMessageType === "image") {
-          // Save image to MongoDB GridFS
-          if (!gridfsBucket) {
-            return res
-              .status(500)
-              .json({ message: "File system not initialized" });
-          }
-          const filename = `img-${Date.now()}-${req.file.originalname}`;
-          const uploadStream = gridfsBucket.openUploadStream(filename, {
-            contentType: req.file.mimetype,
-          });
-          uploadStream.end(req.file.buffer);
-
-          uploadStream.on("error", (err) => {
-            console.error("GridFS upload error:", err);
-            return res.status(500).json({ message: "Failed to store image" });
-          });
-
-          uploadStream.on("finish", (file) => {
-            fileData = {
-              fileUrl: `/api/messages/file/${file._id.toString()}`,
-              fileName: req.file.originalname,
-              fileSize: req.file.size,
-              fileType: req.file.mimetype,
-            };
-
-            if (!finalMessage) {
-              finalMessage = `📎 ${req.file.originalname}`;
-            }
-
-            finalizeAndRespond();
-          });
-
-          // Early return: will respond in finish handler
-          return;
-        } else {
-          // Non-image: use Cloudinary if configured, else save to local filesystem
-          if (isCloudinaryConfigured) {
-            cloudinary.config({
-              cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-              api_key: process.env.CLOUDINARY_API_KEY,
-              api_secret: process.env.CLOUDINARY_API_SECRET,
-            });
-            await new Promise((resolve, reject) => {
-              const cld = cloudinary.uploader.upload_stream(
-                { folder: "chat-messages", resource_type: "auto" },
-                (error, result) => {
-                  if (error) return reject(error);
-                  fileData = {
-                    fileUrl: result.secure_url,
-                    fileName: req.file.originalname,
-                    fileSize: req.file.size,
-                    fileType: req.file.mimetype,
-                  };
-                  resolve();
-                }
-              );
-              cld.end(req.file.buffer);
-            });
-          } else {
-            const uploadPath = path.join(__dirname, "../uploads/messages");
-            if (!fs.existsSync(uploadPath)) {
-              fs.mkdirSync(uploadPath, { recursive: true });
-            }
-            const fname = `message-${Date.now()}-${Math.round(
-              Math.random() * 1e9
-            )}${path.extname(req.file.originalname)}`;
-            const fullPath = path.join(uploadPath, fname);
-            fs.writeFileSync(fullPath, req.file.buffer);
-            fileData = {
-              fileUrl: `/uploads/messages/${fname}`,
-              fileName: req.file.originalname,
-              fileSize: req.file.size,
-              fileType: req.file.mimetype,
-            };
-          }
+          finalMessageType = req.file.mimetype.startsWith("image/")
+            ? "image"
+            : req.file.mimetype.startsWith("video/")
+            ? "video"
+            : req.file.mimetype.startsWith("audio/")
+            ? "audio"
+            : "file";
 
           if (!finalMessage) {
             finalMessage = `📎 ${req.file.originalname}`;
           }
+        } catch (uploadError) {
+          console.error("File upload error:", uploadError);
+          return res.status(500).json({ message: "Failed to upload file" });
         }
       }
 
-      if (!req.file || finalMessageType !== "image") {
-        await finalizeAndRespond();
-      }
+      await finalizeAndRespond();
     } catch (error) {
       console.error("Personal message error:", error);
       res.status(500).json({ message: "Server error" });
@@ -406,101 +495,28 @@ router.post(
       }
 
       if (req.file) {
-        // File upload
-        finalMessageType = req.file.mimetype.startsWith("image/")
-          ? "image"
-          : req.file.mimetype.startsWith("video/")
-          ? "video"
-          : req.file.mimetype.startsWith("audio/")
-          ? "audio"
-          : "file";
+        // File upload - use helper function with Google Drive support
+        try {
+          fileData = await handleFileUpload(req.file);
 
-        if (finalMessageType === "image") {
-          // Save image to MongoDB GridFS
-          if (!gridfsBucket) {
-            return res
-              .status(500)
-              .json({ message: "File system not initialized" });
-          }
-          const filename = `img-${Date.now()}-${req.file.originalname}`;
-          const uploadStream = gridfsBucket.openUploadStream(filename, {
-            contentType: req.file.mimetype,
-          });
-          uploadStream.end(req.file.buffer);
-
-          uploadStream.on("error", (err) => {
-            console.error("GridFS upload error:", err);
-            return res.status(500).json({ message: "Failed to store image" });
-          });
-
-          uploadStream.on("finish", (file) => {
-            fileData = {
-              fileUrl: `/api/messages/file/${file._id.toString()}`,
-              fileName: req.file.originalname,
-              fileSize: req.file.size,
-              fileType: req.file.mimetype,
-            };
-
-            if (!finalMessage) {
-              finalMessage = `📎 ${req.file.originalname}`;
-            }
-
-            finalizeAndRespond();
-          });
-
-          // Early return: will respond in finish handler
-          return;
-        } else {
-          // Non-image: use Cloudinary if configured, else save to local filesystem
-          if (isCloudinaryConfigured) {
-            cloudinary.config({
-              cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-              api_key: process.env.CLOUDINARY_API_KEY,
-              api_secret: process.env.CLOUDINARY_API_SECRET,
-            });
-            await new Promise((resolve, reject) => {
-              const cld = cloudinary.uploader.upload_stream(
-                { folder: "chat-messages", resource_type: "auto" },
-                (error, result) => {
-                  if (error) return reject(error);
-                  fileData = {
-                    fileUrl: result.secure_url,
-                    fileName: req.file.originalname,
-                    fileSize: req.file.size,
-                    fileType: req.file.mimetype,
-                  };
-                  resolve();
-                }
-              );
-              cld.end(req.file.buffer);
-            });
-          } else {
-            const uploadPath = path.join(__dirname, "../uploads/messages");
-            if (!fs.existsSync(uploadPath)) {
-              fs.mkdirSync(uploadPath, { recursive: true });
-            }
-            const fname = `message-${Date.now()}-${Math.round(
-              Math.random() * 1e9
-            )}${path.extname(req.file.originalname)}`;
-            const fullPath = path.join(uploadPath, fname);
-            fs.writeFileSync(fullPath, req.file.buffer);
-            fileData = {
-              fileUrl: `/uploads/messages/${fname}`,
-              fileName: req.file.originalname,
-              fileSize: req.file.size,
-              fileType: req.file.mimetype,
-            };
-          }
+          finalMessageType = req.file.mimetype.startsWith("image/")
+            ? "image"
+            : req.file.mimetype.startsWith("video/")
+            ? "video"
+            : req.file.mimetype.startsWith("audio/")
+            ? "audio"
+            : "file";
 
           if (!finalMessage) {
             finalMessage = `📎 ${req.file.originalname}`;
           }
+        } catch (uploadError) {
+          console.error("File upload error:", uploadError);
+          return res.status(500).json({ message: "Failed to upload file" });
         }
       }
 
-      if (!req.file || finalMessageType !== "image") {
-        await finalizeAndRespond();
-      }
+      await finalizeAndRespond();
     } catch (error) {
       res.status(500).json({ message: "Server error" });
     }

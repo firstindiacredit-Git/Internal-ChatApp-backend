@@ -203,23 +203,44 @@ router.get("/personal/:userId", auth, async (req, res) => {
     const { userId } = req.params;
     const currentUserId = req.user._id;
 
+    // Pagination parameters
+    const limit = parseInt(req.query.limit) || 50; // Default 50 messages
+    const before = req.query.before; // Message ID to load messages before (for loading older messages)
+
     // Verify the other user exists (don't check isActive for messages)
     const otherUser = await User.findById(userId);
     if (!otherUser) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const messages = await Message.find({
+    let query = {
       $or: [
         { sender: currentUserId, receiver: userId },
         { sender: userId, receiver: currentUserId },
       ],
-    })
+    };
+
+    // If 'before' is provided, only get messages created before that message
+    if (before) {
+      const beforeMessage = await Message.findById(before);
+      if (beforeMessage) {
+        query.createdAt = { $lt: beforeMessage.createdAt };
+      }
+    }
+
+    const messages = await Message.find(query)
       .populate("sender", "name email profileImage")
       .populate("receiver", "name email profileImage")
-      .sort({ createdAt: 1 });
+      .sort({ createdAt: -1 }) // Get newest first
+      .limit(limit);
 
-    res.json(messages);
+    // Reverse to show oldest to newest
+    const reversedMessages = messages.reverse();
+
+    res.json({
+      messages: reversedMessages,
+      hasMore: messages.length === limit, // If we got full limit, there might be more
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error" });
   }
@@ -230,6 +251,10 @@ router.get("/group/:groupId", auth, async (req, res) => {
   try {
     const { groupId } = req.params;
     const currentUserId = req.user._id;
+
+    // Pagination parameters
+    const limit = parseInt(req.query.limit) || 50; // Default 50 messages
+    const before = req.query.before; // Message ID to load messages before (for loading older messages)
 
     // Verify user is member of the group
     const group = await Group.findById(groupId);
@@ -247,11 +272,28 @@ router.get("/group/:groupId", auth, async (req, res) => {
         .json({ message: "You are not a member of this group" });
     }
 
-    const messages = await Message.find({ group: groupId })
-      .populate("sender", "name email profileImage")
-      .sort({ createdAt: 1 });
+    let query = { group: groupId };
 
-    res.json(messages);
+    // If 'before' is provided, only get messages created before that message
+    if (before) {
+      const beforeMessage = await Message.findById(before);
+      if (beforeMessage) {
+        query.createdAt = { $lt: beforeMessage.createdAt };
+      }
+    }
+
+    const messages = await Message.find(query)
+      .populate("sender", "name email profileImage")
+      .sort({ createdAt: -1 }) // Get newest first
+      .limit(limit);
+
+    // Reverse to show oldest to newest
+    const reversedMessages = messages.reverse();
+
+    res.json({
+      messages: reversedMessages,
+      hasMore: messages.length === limit, // If we got full limit, there might be more
+    });
   } catch (error) {
     res.status(500).json({ message: "Server error" });
   }

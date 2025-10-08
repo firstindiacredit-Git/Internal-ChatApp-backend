@@ -88,6 +88,38 @@ io.on("connection", (socket) => {
   });
   socket.join(socket.userId);
 
+  // Update user lastSeen in database to now (online)
+  User.findByIdAndUpdate(socket.userId, {
+    lastSeen: new Date(),
+  }).catch((err) => console.error("Error updating lastSeen:", err));
+
+  // Broadcast to all connected users that this user is now online
+  socket.broadcast.emit("user-online", {
+    userId: socket.userId,
+    user: {
+      _id: socket.userId,
+      name: socket.user?.name,
+      email: socket.user?.email,
+      profileImage: socket.user?.profileImage,
+    },
+    lastSeen: new Date(),
+  });
+
+  // Send list of all currently online users to the newly connected user
+  const onlineUsersList = Array.from(activeUsers.entries()).map(
+    ([userId, data]) => ({
+      userId,
+      user: {
+        _id: userId,
+        name: data.user?.name,
+        email: data.user?.email,
+        profileImage: data.user?.profileImage,
+      },
+      lastSeen: data.lastSeen,
+    })
+  );
+  socket.emit("online-users", onlineUsersList);
+
   // Handle personal messages
   socket.on("send-message", async (data) => {
     try {
@@ -959,8 +991,33 @@ io.on("connection", (socket) => {
   });
 
   // Handle disconnect
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
+    const lastSeenTime = new Date();
+
+    // Update user lastSeen in database
+    try {
+      await User.findByIdAndUpdate(socket.userId, {
+        lastSeen: lastSeenTime,
+      });
+    } catch (err) {
+      console.error("Error updating lastSeen on disconnect:", err);
+    }
+
+    // Remove from active users
     activeUsers.delete(socket.userId);
+
+    // Broadcast to all connected users that this user is now offline
+    socket.broadcast.emit("user-offline", {
+      userId: socket.userId,
+      user: {
+        _id: socket.userId,
+        name: socket.user?.name,
+        email: socket.user?.email,
+        profileImage: socket.user?.profileImage,
+      },
+      lastSeen: lastSeenTime,
+    });
+
     console.log(
       `❌ User disconnected: ${socket.user?.name || socket.userId} - ${
         socket.id

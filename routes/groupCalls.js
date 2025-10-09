@@ -189,6 +189,14 @@ router.post("/initiate", authenticateToken, async (req, res) => {
     const random = Math.random().toString(36).substr(2, 6);
     const roomName = `group-call-${timestamp}-${random}`;
 
+    console.log("🎥 ========================================");
+    console.log("🎥 CREATING GROUP CALL");
+    console.log("🎥 Room Name:", roomName);
+    console.log("🎥 Group ID:", groupId);
+    console.log("🎥 Initiator ID:", initiatorId);
+    console.log("🎥 Call Type:", callType);
+    console.log("🎥 ========================================");
+
     const groupCall = new GroupCall({
       group: groupId,
       initiator: initiatorId,
@@ -196,7 +204,7 @@ router.post("/initiate", authenticateToken, async (req, res) => {
       status: "initiated",
       roomName: roomName,
     });
-    console.log("📞 GroupCall created:", groupCall);
+    console.log("📞 GroupCall created with ID:", groupCall._id);
 
     // Add initiator as first participant
     console.log("📞 Adding initiator as participant...");
@@ -221,7 +229,7 @@ router.post("/initiate", authenticateToken, async (req, res) => {
     await groupCall.populate("initiator", "name avatar email");
     await groupCall.populate("participants.user", "name avatar email");
 
-    res.json({
+    const responseData = {
       success: true,
       data: {
         call: {
@@ -229,6 +237,7 @@ router.post("/initiate", authenticateToken, async (req, res) => {
           callType: groupCall.callType,
           status: groupCall.status,
           startTime: groupCall.startTime,
+          roomName: groupCall.roomName, // ✅ IMPORTANT: Include roomName!
           isInitiator: true,
           group: {
             _id: groupCall.group._id,
@@ -253,7 +262,15 @@ router.post("/initiate", authenticateToken, async (req, res) => {
           })),
         },
       },
-    });
+    };
+
+    console.log("✅ ========================================");
+    console.log("✅ SENDING CALL DATA TO FRONTEND");
+    console.log("✅ Room Name:", responseData.data.call.roomName);
+    console.log("✅ Call ID:", responseData.data.call._id);
+    console.log("✅ ========================================");
+
+    res.json(responseData);
   } catch (error) {
     console.error("❌ Error initiating group call:", error);
     console.error("❌ Error stack:", error.stack);

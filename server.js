@@ -622,11 +622,23 @@ io.on("connection", (socket) => {
         return;
       }
 
+      // Get the GroupCall to fetch roomName
+      const GroupCall = require("./models/GroupCall");
+      const groupCall = await GroupCall.findById(callId);
+      const roomName = groupCall?.roomName;
+
+      console.log("🎥 ========================================");
+      console.log("🎥 NOTIFYING GROUP MEMBERS");
+      console.log("🎥 Room Name:", roomName);
+      console.log("🎥 Call ID:", callId);
+      console.log("🎥 ========================================");
+
       // Notify initiator (confirmation)
       socket.emit("group-call-initiated", {
         callId,
         callType,
         groupId,
+        roomName, // ✅ Include roomName!
         initiator: socket.user,
       });
 
@@ -644,15 +656,19 @@ io.on("connection", (socket) => {
             memberSocketData &&
             member.user._id.toString() !== socket.userId
           ) {
-            console.log(
-              `📤 Notifying group member ${member.user.name} about new call`
-            );
+            console.log(`📤 Notifying ${member.user.name} - Room: ${roomName}`);
             io.to(memberSocketData.socketId).emit("incoming-group-call", {
               callId,
               callType,
               groupId,
               groupName: group.name,
+              roomName, // ✅ CRITICAL: Include roomName for incoming calls!
               initiator: socket.user,
+              group: {
+                name: group.name,
+                avatar: group.avatar,
+                _id: group._id,
+              },
             });
           }
         });
@@ -1045,11 +1061,10 @@ mongoose
     console.log("Connected to MongoDB");
 
     // Sync with NTP server first (get global time, not system time)
-   
+
     try {
-      await syncWithNTPServer(); 
-    } catch (error) {
-     }
+      await syncWithNTPServer();
+    } catch (error) {}
 
     // Initialize auto-disable scheduler after DB connection and NTP sync
     initializeAutoDisableScheduler();
@@ -1086,7 +1101,7 @@ async function syncWithNTPServer() {
 
     function tryNextServer() {
       if (currentServerIndex >= ntpServers.length) {
-         reject(new Error("All NTP servers failed"));
+        reject(new Error("All NTP servers failed"));
         return;
       }
 
@@ -1106,7 +1121,7 @@ async function syncWithNTPServer() {
           const systemTime = new Date();
           globalTimeOffset = date.getTime() - systemTime.getTime();
           lastNTPSync = date;
-         
+
           resolve(date);
         }
       });
@@ -1136,16 +1151,12 @@ async function initializeAutoDisableScheduler() {
       const currentDay = istNow.format("dddd"); // Monday, Tuesday, etc.
       const currentDate = istNow.format("YYYY-MM-DD");
 
-      
-
       // Check user-specific schedules (enable and disable)
       const activeSchedules = await ScheduledDisable.find({
         isActive: true,
         days: currentDay,
         $or: [{ enableTime: currentTime }, { disableTime: currentTime }],
       }).populate("users", "name email");
-
-      
 
       for (const schedule of activeSchedules) {
         let actionTriggered = false;
@@ -1298,8 +1309,6 @@ async function initializeAutoDisableScheduler() {
         }
       }
     });
-
-   
   } catch (error) {
     console.error("❌ Error initializing auto-disable scheduler:", error);
   }

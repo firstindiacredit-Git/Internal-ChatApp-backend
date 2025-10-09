@@ -1045,13 +1045,11 @@ mongoose
     console.log("Connected to MongoDB");
 
     // Sync with NTP server first (get global time, not system time)
-    console.log("🌍 Syncing with global NTP time server...");
+   
     try {
-      await syncWithNTPServer();
-      console.log("✅ Global time synchronized");
+      await syncWithNTPServer(); 
     } catch (error) {
-      console.warn("⚠️  NTP sync failed, using system time as fallback");
-    }
+     }
 
     // Initialize auto-disable scheduler after DB connection and NTP sync
     initializeAutoDisableScheduler();
@@ -1088,8 +1086,7 @@ async function syncWithNTPServer() {
 
     function tryNextServer() {
       if (currentServerIndex >= ntpServers.length) {
-        console.error("❌ All NTP servers failed");
-        reject(new Error("All NTP servers failed"));
+         reject(new Error("All NTP servers failed"));
         return;
       }
 
@@ -1101,20 +1098,15 @@ async function syncWithNTPServer() {
           ? "Google NTP"
           : "Pool NTP";
 
-      console.log(`🔄 Trying ${serverName} server: ${server}`);
-
       ntpClient.getNetworkTime(server, 123, (err, date) => {
         if (err) {
-          console.warn(`⚠️  ${serverName} sync failed: ${err.message}`);
           currentServerIndex++;
           tryNextServer();
         } else {
           const systemTime = new Date();
           globalTimeOffset = date.getTime() - systemTime.getTime();
           lastNTPSync = date;
-          console.log(
-            `✅ NTP synced with ${serverName} (${server}) - Offset: ${globalTimeOffset}ms`
-          );
+         
           resolve(date);
         }
       });
@@ -1136,13 +1128,6 @@ function getCurrentISTTime() {
 async function initializeAutoDisableScheduler() {
   try {
     const istNow = getCurrentISTTime();
-    console.log(`⏰ User-specific auto-disable scheduler initialized`);
-    console.log(`   🌍 Using Global NTP Time (NOT system time)`);
-    console.log(`   📡 NTP Offset: ${globalTimeOffset}ms`);
-    console.log(
-      `   🇮🇳 Current IST Time: ${istNow.format("DD/MM/YYYY HH:mm:ss")}`
-    );
-    console.log(`   📅 Checking scheduled disables for specific users only`);
 
     // Run every minute to check if it's time to enable/disable users (using IST)
     cron.schedule("* * * * *", async () => {
@@ -1151,7 +1136,7 @@ async function initializeAutoDisableScheduler() {
       const currentDay = istNow.format("dddd"); // Monday, Tuesday, etc.
       const currentDate = istNow.format("YYYY-MM-DD");
 
-      console.log(`⏰ Checking schedules at ${currentTime} on ${currentDay}`);
+      
 
       // Check user-specific schedules (enable and disable)
       const activeSchedules = await ScheduledDisable.find({
@@ -1160,7 +1145,7 @@ async function initializeAutoDisableScheduler() {
         $or: [{ enableTime: currentTime }, { disableTime: currentTime }],
       }).populate("users", "name email");
 
-      console.log(`📋 Found ${activeSchedules.length} matching schedule(s)`);
+      
 
       for (const schedule of activeSchedules) {
         let actionTriggered = false;
@@ -1314,9 +1299,7 @@ async function initializeAutoDisableScheduler() {
       }
     });
 
-    console.log(
-      "✅ User-specific disable scheduler started (using IST timezone)"
-    );
+   
   } catch (error) {
     console.error("❌ Error initializing auto-disable scheduler:", error);
   }

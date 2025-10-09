@@ -289,33 +289,56 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
     const { callId } = req.params;
     const userId = req.user.userId;
 
+    console.log("📞 ========================================");
+    console.log("📞 JOIN GROUP CALL REQUEST");
+    console.log("📞 Call ID:", callId);
+    console.log("📞 User ID:", userId);
+    console.log("📞 ========================================");
+
     const groupCall = await GroupCall.findById(callId)
       .populate("group", "name avatar")
       .populate("initiator", "name avatar email")
       .populate("participants.user", "name avatar email");
 
     if (!groupCall) {
+      console.error("❌ Group call not found:", callId);
       return res.status(404).json({
         success: false,
         message: "Group call not found",
       });
     }
 
+    console.log("✅ Group call found:", groupCall._id);
+    console.log("📊 Current status:", groupCall.status);
+    console.log("👥 Current participants:", groupCall.participants.length);
+
     // Verify user is member of the group
     const group = await Group.findById(groupCall.group._id);
+    if (!group) {
+      console.error("❌ Group not found:", groupCall.group._id);
+      return res.status(404).json({
+        success: false,
+        message: "Group not found",
+      });
+    }
+
     const isMember = group.members.some(
       (member) => member.user.toString() === userId
     );
 
     if (!isMember) {
+      console.error("❌ User not a member:", userId);
       return res.status(403).json({
         success: false,
         message: "Not authorized to join this group call",
       });
     }
 
+    console.log("✅ User is group member");
+
     // Check if call is still active
     if (groupCall.status !== "initiated" && groupCall.status !== "active") {
+      console.error("❌ Call not active:", groupCall.status);
       return res.status(400).json({
         success: false,
         message: "Group call is no longer active",
@@ -324,10 +347,11 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
 
     // Add participant to the call
     const existingParticipant = groupCall.participants.find(
-      (p) => p.user.toString() === userId
+      (p) => p.user && p.user.toString() === userId
     );
 
     if (!existingParticipant) {
+      console.log("➕ Adding new participant:", userId);
       groupCall.participants.push({
         user: userId,
         joinedAt: new Date(),
@@ -336,20 +360,35 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
         isVideoEnabled: groupCall.callType === "video",
       });
     } else {
+      console.log("♻️ Reactivating existing participant:", userId);
       existingParticipant.isActive = true;
       existingParticipant.joinedAt = new Date();
     }
 
     // Update call status to active if it was just initiated
     if (groupCall.status === "initiated") {
+      console.log("📊 Updating status: initiated → active");
       groupCall.status = "active";
-      await groupCall.save();
     }
 
-    // Re-populate after adding participant
-    await groupCall.populate("participants.user", "name avatar email");
+    // Save changes
+    console.log("💾 Saving group call...");
+    await groupCall.save();
+    console.log("✅ Group call saved successfully");
 
-    res.json({
+    // Re-populate after adding participant
+    console.log("🔄 Re-populating participants...");
+    try {
+      await groupCall.populate("participants.user", "name avatar email");
+      console.log("✅ Participants populated:", groupCall.participants.length);
+    } catch (populateError) {
+      console.error("⚠️ Populate warning:", populateError.message);
+      // Continue even if populate fails
+    }
+
+    console.log("📦 Building response data...");
+    
+    const responseData = {
       success: true,
       data: {
         call: {
@@ -357,6 +396,7 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
           callType: groupCall.callType,
           status: groupCall.status,
           startTime: groupCall.startTime,
+          roomName: groupCall.roomName, // Include roomName
           group: {
             _id: groupCall.group._id,
             name: groupCall.group.name,
@@ -368,24 +408,50 @@ router.post("/:callId/join", authenticateToken, async (req, res) => {
             avatar: groupCall.initiator.avatar,
             email: groupCall.initiator.email,
           },
-          participants: groupCall.participants.map((participant) => ({
-            _id: participant.user._id,
-            name: participant.user.name,
-            avatar: participant.user.avatar,
-            email: participant.user.email,
-            joinedAt: participant.joinedAt,
-            isActive: participant.isActive,
-            isMuted: participant.isMuted,
-            isVideoEnabled: participant.isVideoEnabled,
-          })),
+          participants: groupCall.participants
+            .filter(p => p.user && p.user._id) // Only include valid participants
+            .map((participant) => {
+              try {
+                return {
+                  _id: participant.user._id,
+                  name: participant.user.name || 'Unknown',
+                  avatar: participant.user.avatar || '',
+                  email: participant.user.email || '',
+                  joinedAt: participant.joinedAt,
+                  isActive: participant.isActive,
+                  isMuted: participant.isMuted,
+                  isVideoEnabled: participant.isVideoEnabled,
+                };
+              } catch (mapError) {
+                console.error("⚠️ Error mapping participant:", mapError);
+                return null;
+              }
+            })
+            .filter(p => p !== null), // Remove failed mappings
         },
       },
-    });
+    };
+
+    console.log("✅ ========================================");
+    console.log("✅ JOIN SUCCESSFUL");
+    console.log("✅ Participant count:", groupCall.participants.length);
+    console.log("✅ Valid participants:", responseData.data.call.participants.length);
+    console.log("✅ Room Name:", groupCall.roomName);
+    console.log("✅ ========================================");
+
+    res.json(responseData);
   } catch (error) {
-    console.error("Error joining group call:", error);
+    console.error("❌ ========================================");
+    console.error("❌ ERROR JOINING GROUP CALL");
+    console.error("❌ Error:", error);
+    console.error("❌ Error message:", error.message);
+    console.error("❌ Error stack:", error.stack);
+    console.error("❌ ========================================");
+
     res.status(500).json({
       success: false,
       message: "Failed to join group call",
+      error: error.message,
     });
   }
 });

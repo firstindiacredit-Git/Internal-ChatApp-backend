@@ -1078,6 +1078,89 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle force disconnect (immediate disconnect when closing tab)
+  socket.on("force-disconnect", async (data) => {
+    const lastSeenTime = new Date();
+
+    console.log(`🚪 Force disconnect: ${socket.user?.name || socket.userId}`);
+
+    // Update user lastSeen in database
+    try {
+      await User.findByIdAndUpdate(socket.userId, {
+        lastSeen: lastSeenTime,
+      });
+    } catch (err) {
+      console.error("Error updating lastSeen:", err);
+    }
+
+    // Immediately remove from active users
+    activeUsers.delete(socket.userId);
+
+    // Broadcast offline status immediately
+    socket.broadcast.emit("user-offline", {
+      userId: socket.userId,
+      user: {
+        _id: socket.userId,
+        name: socket.user?.name,
+        email: socket.user?.email,
+        profileImage: socket.user?.profileImage,
+      },
+      lastSeen: lastSeenTime,
+    });
+
+    // Disconnect socket
+    socket.disconnect(true);
+  });
+
+  // Handle user away (tab hidden but not closed)
+  socket.on("user-away", async (data) => {
+    console.log(`📴 User away: ${socket.user?.name || socket.userId}`);
+
+    // Remove from active users so push notifications will be sent
+    activeUsers.delete(socket.userId);
+
+    const lastSeenTime = new Date();
+    await User.findByIdAndUpdate(socket.userId, {
+      lastSeen: lastSeenTime,
+    }).catch((err) => console.error("Error updating lastSeen:", err));
+
+    // Broadcast offline status
+    socket.broadcast.emit("user-offline", {
+      userId: socket.userId,
+      user: {
+        _id: socket.userId,
+        name: socket.user?.name,
+        email: socket.user?.email,
+        profileImage: socket.user?.profileImage,
+      },
+      lastSeen: lastSeenTime,
+    });
+  });
+
+  // Handle user active (tab visible again)
+  socket.on("user-active", async (data) => {
+    console.log(`✅ User active: ${socket.user?.name || socket.userId}`);
+
+    // Add back to active users
+    activeUsers.set(socket.userId, {
+      socketId: socket.id,
+      user: socket.user,
+      lastSeen: new Date(),
+    });
+
+    // Broadcast online status
+    socket.broadcast.emit("user-online", {
+      userId: socket.userId,
+      user: {
+        _id: socket.userId,
+        name: socket.user?.name,
+        email: socket.user?.email,
+        profileImage: socket.user?.profileImage,
+      },
+      lastSeen: new Date(),
+    });
+  });
+
   // Handle disconnect
   socket.on("disconnect", async () => {
     const lastSeenTime = new Date();
@@ -1091,7 +1174,7 @@ io.on("connection", (socket) => {
       console.error("Error updating lastSeen on disconnect:", err);
     }
 
-    // Remove from active users
+    // Immediately remove from active users
     activeUsers.delete(socket.userId);
 
     // Broadcast to all connected users that this user is now offline

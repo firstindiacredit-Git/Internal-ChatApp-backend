@@ -49,6 +49,9 @@ app.use(express.urlencoded({ limit: "100mb", extended: true })); // Increased to
 // Serve static files for profile images
 app.use("/uploads", express.static("uploads"));
 
+// Serve static files for push notification demo
+app.use(express.static(path.join(__dirname, "public")));
+
 // Serve static files from frontend build
 app.use(express.static(path.join(__dirname, "dist")));
 
@@ -61,6 +64,10 @@ app.use("/api/calls", require("./routes/calls"));
 app.use("/api/group-calls", require("./routes/groupCalls"));
 app.use("/api/time-settings", require("./routes/timeSettings"));
 app.use("/api/scheduled-disable", require("./routes/scheduledDisable"));
+app.use("/api/push-notifications", require("./routes/pushNotifications"));
+
+// Import push notification helper
+const { sendPushToUser } = require("./routes/pushNotifications");
 
 // Authenticate socket connections with JWT and track active users
 const activeUsers = new Map();
@@ -193,6 +200,30 @@ io.on("connection", (socket) => {
       );
       socket.to(receiver).emit("receive-message", receiverMessage);
 
+      // Send push notification if receiver is not online
+      const receiverOnline = activeUsers.has(receiver);
+      if (!receiverOnline) {
+        const senderName = newMessage.sender?.name || "Someone";
+        const messagePreview =
+          newMessage.messageType === "text"
+            ? newMessage.message.substring(0, 100)
+            : `Sent a ${newMessage.messageType}`;
+
+        sendPushToUser(
+          receiver,
+          `New message from ${senderName}`,
+          messagePreview,
+          newMessage.sender?.profileImage || "/icon.png",
+          {
+            type: "personal-message",
+            senderId: sender,
+            messageId: newMessage._id.toString(),
+          }
+        ).catch((err) => {
+          console.log("Push notification failed:", err.message);
+        });
+      }
+
       // Emit back to sender for confirmation
       const confirmationMessage = {
         id: newMessage._id,
@@ -277,6 +308,38 @@ io.on("connection", (socket) => {
         createdAt: newMessage.createdAt,
         _id: newMessage._id,
       });
+
+      // Send push notifications to offline group members
+      const group = await Group.findById(groupId);
+      if (group && group.members) {
+        const senderName = newMessage.sender?.name || "Someone";
+        const groupName = group.name || "Group";
+        const messagePreview =
+          newMessage.messageType === "text"
+            ? newMessage.message.substring(0, 100)
+            : `Sent a ${newMessage.messageType}`;
+
+        group.members.forEach((member) => {
+          const memberId = member.user.toString();
+          // Skip sender and online members
+          if (memberId !== sender && !activeUsers.has(memberId)) {
+            sendPushToUser(
+              memberId,
+              `${senderName} in ${groupName}`,
+              messagePreview,
+              newMessage.sender?.profileImage || "/icon.png",
+              {
+                type: "group-message",
+                groupId: groupId,
+                senderId: sender,
+                messageId: newMessage._id.toString(),
+              }
+            ).catch((err) => {
+              console.log("Push notification failed:", err.message);
+            });
+          }
+        });
+      }
 
       // Emit back to sender for confirmation
       socket.emit("group-message-sent", {

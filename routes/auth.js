@@ -135,7 +135,7 @@ router.post(
         // Send notification to all admins
         const notificationData = {
           type: "disabled_user_login_attempt",
-          message: `${user.name} (${user.email}) is trying to login but account is disabled`,
+          message: `${user.name} (${user.email}) is trying to login but account is  disabled`,
           userId: user._id,
           userName: user.name,
           userEmail: user.email,

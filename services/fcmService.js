@@ -53,18 +53,47 @@ function initializeFirebase() {
       universe_domain: "googleapis.com",
     };
 
-    // Parse private key carefully
-    let privateKey = process.env.FIREBASE_PRIVATE_KEY.toString();
+    // Parse private key carefully - handle both escaped and actual newlines
+    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
-    // Remove outer quotes
-    privateKey = privateKey.trim();
-    if (privateKey.startsWith('"')) privateKey = privateKey.slice(1);
-    if (privateKey.endsWith('"')) privateKey = privateKey.slice(0, -1);
+    if (!privateKey) {
+      console.warn("⚠️ FIREBASE_PRIVATE_KEY is empty or undefined");
+      return false;
+    }
 
-    // Replace escaped newlines with actual newlines
+    // Convert to string and trim
+    privateKey = privateKey.toString().trim();
+
+    // Remove outer quotes if present
+    if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+      privateKey = privateKey.slice(1, -1);
+    }
+
+    // Replace literal \n with actual newlines (for escaped format)
     privateKey = privateKey.replace(/\\n/g, "\n");
 
+    // Ensure proper formatting
+    if (!privateKey.includes("BEGIN PRIVATE KEY")) {
+      console.error(
+        "❌ Invalid private key format - missing BEGIN PRIVATE KEY header"
+      );
+      return false;
+    }
+
     serviceAccount.private_key = privateKey;
+
+    // Validate the service account object before initialization
+    console.log("🔍 Firebase config validation:");
+    console.log("   Project ID:", serviceAccount.project_id ? "✓" : "✗");
+    console.log("   Client Email:", serviceAccount.client_email ? "✓" : "✗");
+    console.log(
+      "   Private Key Length:",
+      serviceAccount.private_key?.length || 0
+    );
+    console.log(
+      "   Private Key Start:",
+      serviceAccount.private_key?.substring(0, 30) || "N/A"
+    );
 
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
@@ -75,6 +104,9 @@ function initializeFirebase() {
     return true;
   } catch (error) {
     console.error("❌ Firebase init failed:", error.message);
+    if (error.stack) {
+      console.error("Stack trace:", error.stack);
+    }
     console.log("ℹ️ Web Push will be used as fallback");
     return false;
   }
@@ -162,5 +194,3 @@ module.exports = {
   sendFCMToUser,
   getFCMTokenCount,
 };
-
-

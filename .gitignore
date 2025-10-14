@@ -5,4 +5,4 @@ firebase-service-account.json
 .env.local
 uploads/
 
-*.log
+

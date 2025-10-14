@@ -65,9 +65,13 @@ app.use("/api/group-calls", require("./routes/groupCalls"));
 app.use("/api/time-settings", require("./routes/timeSettings"));
 app.use("/api/scheduled-disable", require("./routes/scheduledDisable"));
 app.use("/api/push-notifications", require("./routes/pushNotifications"));
+app.use("/api/fcm-notifications", require("./routes/fcmNotifications"));
+app.use("/api/daily-updates", require("./routes/dailyUpdates"));
+app.use("/api/tasks", require("./routes/tasks"));
 
-// Import push notification helper
+// Import push notification helpers
 const { sendPushToUser } = require("./routes/pushNotifications");
+const { sendFCMToUser } = require("./services/fcmService");
 
 // Authenticate socket connections with JWT and track active users
 const activeUsers = new Map();
@@ -209,19 +213,40 @@ io.on("connection", (socket) => {
             ? newMessage.message.substring(0, 100)
             : `Sent a ${newMessage.messageType}`;
 
-        sendPushToUser(
+        // Try FCM first, fallback to Web Push
+        sendFCMToUser(
           receiver,
           `New message from ${senderName}`,
           messagePreview,
-          newMessage.sender?.profileImage || "/icon.png",
           {
             type: "personal-message",
             senderId: sender,
+            senderName: senderName,
+            receiverId: receiver,
             messageId: newMessage._id.toString(),
+            icon: newMessage.sender?.profileImage || "/icon.png",
           }
-        ).catch((err) => {
-          console.log("Push notification failed:", err.message);
-        });
+        )
+          .then((result) => {
+            if (!result.success) {
+              return sendPushToUser(
+                receiver,
+                `New message from ${senderName}`,
+                messagePreview,
+                newMessage.sender?.profileImage || "/icon.png",
+                {
+                  type: "personal-message",
+                  senderId: sender,
+                  senderName: senderName,
+                  receiverId: receiver,
+                  messageId: newMessage._id.toString(),
+                }
+              );
+            }
+          })
+          .catch((err) => {
+            console.log("Push notification failed:", err.message);
+          });
       }
 
       // Emit back to sender for confirmation
@@ -323,20 +348,44 @@ io.on("connection", (socket) => {
           const memberId = member.user.toString();
           // Skip sender and online members
           if (memberId !== sender && !activeUsers.has(memberId)) {
-            sendPushToUser(
+            // Try FCM first, fallback to Web Push
+            sendFCMToUser(
               memberId,
               `${senderName} in ${groupName}`,
               messagePreview,
-              newMessage.sender?.profileImage || "/icon.png",
               {
                 type: "group-message",
                 groupId: groupId,
+                groupName: groupName,
                 senderId: sender,
+                senderName: senderName,
+                receiverId: memberId,
                 messageId: newMessage._id.toString(),
+                icon: newMessage.sender?.profileImage || "/icon.png",
               }
-            ).catch((err) => {
-              console.log("Push notification failed:", err.message);
-            });
+            )
+              .then((result) => {
+                if (!result.success) {
+                  return sendPushToUser(
+                    memberId,
+                    `${senderName} in ${groupName}`,
+                    messagePreview,
+                    newMessage.sender?.profileImage || "/icon.png",
+                    {
+                      type: "group-message",
+                      groupId: groupId,
+                      groupName: groupName,
+                      senderId: sender,
+                      senderName: senderName,
+                      receiverId: memberId,
+                      messageId: newMessage._id.toString(),
+                    }
+                  );
+                }
+              })
+              .catch((err) => {
+                console.log("Push notification failed:", err.message);
+              });
           }
         });
       }
@@ -432,10 +481,55 @@ io.on("connection", (socket) => {
           `📤 Incoming call notification sent to receiver ${receiverId}`
         );
       } else {
-        console.log(`❌ Receiver ${receiverId} is not online`);
+        console.log(
+          `❌ Receiver ${receiverId} is not online - sending push notification`
+        );
+
+        // Send push notification for incoming call
+        const callerName = socket.user?.name || "Someone";
+        const callTypeText = callType === "video" ? "Video" : "Voice";
+
+        // Try FCM first, fallback to Web Push
+        sendFCMToUser(
+          receiverId,
+          `📞 Incoming ${callTypeText} Call`,
+          `${callerName} is calling you...`,
+          {
+            type: "incoming-call",
+            callType: callType,
+            callId: callId,
+            callerId: socket.userId,
+            callerName: callerName,
+            callerImage: socket.user?.profileImage || "/icon.png",
+            icon: socket.user?.profileImage || "/icon.png",
+          }
+        )
+          .then((result) => {
+            if (!result.success) {
+              return sendPushToUser(
+                receiverId,
+                `📞 Incoming ${callTypeText} Call`,
+                `${callerName} is calling you...`,
+                socket.user?.profileImage || "/icon.png",
+                {
+                  type: "incoming-call",
+                  callType: callType,
+                  callId: callId,
+                  callerId: socket.userId,
+                  callerName: callerName,
+                }
+              );
+            }
+          })
+          .catch((err) => {
+            console.log("Call push notification failed:", err.message);
+          });
+
+        // Still notify the caller that receiver is offline
         socket.emit("call-error", {
-          error: "Receiver is not online",
+          error: "Receiver is not online - notification sent",
           receiverId: receiverId,
+          notificationSent: true,
         });
       }
     } catch (error) {
@@ -713,26 +807,81 @@ io.on("connection", (socket) => {
       );
 
       if (group) {
+        const initiatorName = socket.user?.name || "Someone";
+        const callTypeText = callType === "video" ? "Video" : "Voice";
+
         group.members.forEach((member) => {
-          const memberSocketData = activeUsers.get(member.user._id.toString());
-          if (
-            memberSocketData &&
-            member.user._id.toString() !== socket.userId
-          ) {
-            console.log(`📤 Notifying ${member.user.name} - Room: ${roomName}`);
-            io.to(memberSocketData.socketId).emit("incoming-group-call", {
-              callId,
-              callType,
-              groupId,
-              groupName: group.name,
-              roomName, // ✅ CRITICAL: Include roomName for incoming calls!
-              initiator: socket.user,
-              group: {
-                name: group.name,
-                avatar: group.avatar,
-                _id: group._id,
-              },
-            });
+          const memberId = member.user._id.toString();
+          const memberSocketData = activeUsers.get(memberId);
+
+          if (memberId !== socket.userId) {
+            if (memberSocketData) {
+              // Member is online - send socket event
+              console.log(
+                `📤 Notifying ${member.user.name} - Room: ${roomName}`
+              );
+              io.to(memberSocketData.socketId).emit("incoming-group-call", {
+                callId,
+                callType,
+                groupId,
+                groupName: group.name,
+                roomName, // ✅ CRITICAL: Include roomName for incoming calls!
+                initiator: socket.user,
+                group: {
+                  name: group.name,
+                  avatar: group.avatar,
+                  _id: group._id,
+                },
+              });
+            } else {
+              // Member is offline - send push notification
+              console.log(
+                `📤 Sending push notification to offline member: ${member.user.name}`
+              );
+
+              sendFCMToUser(
+                memberId,
+                `📞 Incoming Group ${callTypeText} Call`,
+                `${initiatorName} is calling in ${group.name}`,
+                {
+                  type: "incoming-group-call",
+                  callType: callType,
+                  callId: callId,
+                  groupId: groupId,
+                  groupName: group.name,
+                  roomName: roomName,
+                  initiatorId: socket.userId,
+                  initiatorName: initiatorName,
+                  icon: socket.user?.profileImage || "/icon.png",
+                }
+              )
+                .then((result) => {
+                  if (!result.success) {
+                    return sendPushToUser(
+                      memberId,
+                      `📞 Incoming Group ${callTypeText} Call`,
+                      `${initiatorName} is calling in ${group.name}`,
+                      socket.user?.profileImage || "/icon.png",
+                      {
+                        type: "incoming-group-call",
+                        callType: callType,
+                        callId: callId,
+                        groupId: groupId,
+                        groupName: group.name,
+                        roomName: roomName,
+                        initiatorId: socket.userId,
+                        initiatorName: initiatorName,
+                      }
+                    );
+                  }
+                })
+                .catch((err) => {
+                  console.log(
+                    `Push notification failed for ${member.user.name}:`,
+                    err.message
+                  );
+                });
+            }
           }
         });
       }

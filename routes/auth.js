@@ -125,12 +125,14 @@ router.post(
       if (!user.isActive) {
         // Send notification to admins about disabled user trying to login
         const { io } = require("../server");
+        const { sendFCMToUser } = require("../services/fcmService");
+        const { sendPushToUser } = require("./pushNotifications");
 
         // Get all admins and superadmins
         const admins = await User.find({
           role: { $in: ["superadmin", "admin"] },
           isActive: true,
-        }).select("_id");
+        }).select("_id name email");
 
         // Send notification to all admins
         const notificationData = {
@@ -145,12 +147,51 @@ router.post(
           },
         };
 
-        // Emit to all admin sockets
-        admins.forEach((admin) => {
+        // Emit to all admin sockets and send push notifications
+        admins.forEach(async (admin) => {
+          // Socket notification for online admins
           io.to(admin._id.toString()).emit(
             "admin_notification",
             notificationData
           );
+
+          // Push/FCM notification for offline admins
+          const title = "🔒 Disabled User Login Attempt";
+          const body = `${user.name} is trying to login but their account is disabled`;
+
+          // Try FCM first, fallback to Web Push
+          try {
+            const result = await sendFCMToUser(
+              admin._id.toString(),
+              title,
+              body,
+              {
+                type: "disabled_user_login_attempt",
+                userId: user._id.toString(),
+                userName: user.name,
+                userEmail: user.email,
+                icon: user.profileImage || "/icon.png",
+              }
+            );
+
+            if (!result.success) {
+              // Fallback to Web Push
+              await sendPushToUser(
+                admin._id.toString(),
+                title,
+                body,
+                user.profileImage || "/icon.png",
+                {
+                  type: "disabled_user_login_attempt",
+                  userId: user._id.toString(),
+                  userName: user.name,
+                  userEmail: user.email,
+                }
+              );
+            }
+          } catch (err) {
+            console.log("Push notification failed for admin:", err.message);
+          }
         });
 
         return res.status(403).json({
@@ -166,6 +207,79 @@ router.post(
       // Update last seen
       user.lastSeen = new Date();
       await user.save();
+
+      // Send login notification to admins (for regular users only)
+      if (user.role === "user") {
+        try {
+          const { io } = require("../server");
+          const { sendFCMToUser } = require("../services/fcmService");
+          const { sendPushToUser } = require("./pushNotifications");
+
+          // Get all admins and superadmins
+          const admins = await User.find({
+            role: { $in: ["superadmin", "admin"] },
+            isActive: true,
+          }).select("_id name email");
+
+          const loginNotificationData = {
+            type: "user_login",
+            message: `${user.name} (${user.email}) has logged in`,
+            userId: user._id,
+            userName: user.name,
+            userEmail: user.email,
+            timestamp: new Date(),
+          };
+
+          // Notify all admins
+          admins.forEach(async (admin) => {
+            // Socket notification for online admins
+            io.to(admin._id.toString()).emit(
+              "admin_notification",
+              loginNotificationData
+            );
+
+            // Push/FCM notification for offline admins
+            const title = "👤 User Login";
+            const body = `${user.name} has logged in`;
+
+            try {
+              const result = await sendFCMToUser(
+                admin._id.toString(),
+                title,
+                body,
+                {
+                  type: "user_login",
+                  userId: user._id.toString(),
+                  userName: user.name,
+                  userEmail: user.email,
+                  icon: user.profileImage || "/icon.png",
+                }
+              );
+
+              if (!result.success) {
+                // Fallback to Web Push
+                await sendPushToUser(
+                  admin._id.toString(),
+                  title,
+                  body,
+                  user.profileImage || "/icon.png",
+                  {
+                    type: "user_login",
+                    userId: user._id.toString(),
+                    userName: user.name,
+                    userEmail: user.email,
+                  }
+                );
+              }
+            } catch (err) {
+              console.log("Login notification failed for admin:", err.message);
+            }
+          });
+        } catch (notifError) {
+          // Don't fail login if notification fails
+          console.error("Failed to send login notifications:", notifError);
+        }
+      }
 
       res.json({
         message: "Login successful",

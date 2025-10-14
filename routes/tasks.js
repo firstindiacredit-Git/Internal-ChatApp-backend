@@ -3,7 +3,10 @@ const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const router = express.Router();
 const Task = require("../models/Task");
+const User = require("../models/User");
 const { auth } = require("../middleware/auth");
+const { sendFCMToUser } = require("../services/fcmService");
+const { sendPushToUser } = require("./pushNotifications");
 
 // Configure Cloudinary
 cloudinary.config({
@@ -107,6 +110,90 @@ router.post("/:id/comment", auth, async (req, res) => {
       `✅ Comment added to task: ${task.title}`,
       media ? `with ${media.length} media files` : ""
     );
+
+    // Send notification to task owner if comment is from someone else
+    try {
+      const taskWithUser = await Task.findById(req.params.id).populate(
+        "user",
+        "_id name email profileImage"
+      );
+
+      if (
+        taskWithUser &&
+        taskWithUser.user &&
+        taskWithUser.user._id.toString() !== req.user._id.toString()
+      ) {
+        const { io } = require("../server");
+
+        const notificationData = {
+          type: "task_comment",
+          message: `${req.user.name} commented on your task: ${taskWithUser.title}`,
+          taskId: taskWithUser._id,
+          taskTitle: taskWithUser.title,
+          commentText: text ? text.substring(0, 100) : "Added media",
+          commentedBy: req.user.name,
+          timestamp: new Date(),
+        };
+
+        // Socket notification
+        io.to(taskWithUser.user._id.toString()).emit(
+          "task_notification",
+          notificationData
+        );
+
+        // Push/FCM notification
+        const notificationTitle = "💬 Task Comment";
+        const notificationBody = `${req.user.name} commented: "${
+          text ? text.substring(0, 50) : "See attachment"
+        }..."`;
+
+        try {
+          const fcmResult = await sendFCMToUser(
+            taskWithUser.user._id.toString(),
+            notificationTitle,
+            notificationBody,
+            {
+              type: "task_comment",
+              taskId: taskWithUser._id.toString(),
+              taskTitle: taskWithUser.title,
+              commentedBy: req.user.name,
+              commentedById: req.user._id.toString(),
+              icon: req.user.profileImage || "/icon.png",
+            }
+          );
+
+          if (!fcmResult.success) {
+            await sendPushToUser(
+              taskWithUser.user._id.toString(),
+              notificationTitle,
+              notificationBody,
+              req.user.profileImage || "/icon.png",
+              {
+                type: "task_comment",
+                taskId: taskWithUser._id.toString(),
+                taskTitle: taskWithUser.title,
+                commentedBy: req.user.name,
+              }
+            );
+          }
+
+          console.log(
+            `📬 Task comment notification sent to: ${taskWithUser.user.name}`
+          );
+        } catch (notifError) {
+          console.log(
+            "⚠️ Failed to send comment notification:",
+            notifError.message
+          );
+        }
+      }
+    } catch (notifError) {
+      console.error(
+        "⚠️ Failed to send task comment notification:",
+        notifError.message
+      );
+    }
+
     res.json(task);
   } catch (error) {
     console.error("Error adding comment:", error);
@@ -234,6 +321,83 @@ router.post("/assign", auth, async (req, res) => {
       task.media.length,
       "media files"
     );
+
+    // Send notification to the user about task assignment
+    try {
+      const { io } = require("../server");
+      const assignedUser = await User.findById(userId).select(
+        "_id name email profileImage"
+      );
+
+      if (assignedUser) {
+        const notificationData = {
+          type: "task_assigned",
+          message: `New task assigned: ${title}`,
+          taskId: task._id,
+          taskTitle: title,
+          taskPriority: priority || "medium",
+          taskDueDate: dueDate || null,
+          assignedBy: req.user.name,
+          timestamp: new Date(),
+        };
+
+        // Socket notification for online users
+        io.to(userId).emit("task_notification", notificationData);
+
+        // Push/FCM notification (will send if user is offline)
+        const notificationTitle = "📋 New Task Assigned";
+        const notificationBody = `${req.user.name} assigned you: "${title}"`;
+        const priorityEmoji =
+          priority === "high" ? "🔴" : priority === "low" ? "🟢" : "🟡";
+
+        try {
+          const fcmResult = await sendFCMToUser(
+            userId,
+            notificationTitle,
+            `${priorityEmoji} ${notificationBody}`,
+            {
+              type: "task_assigned",
+              taskId: task._id.toString(),
+              taskTitle: title,
+              taskPriority: priority || "medium",
+              assignedBy: req.user.name,
+              assignedById: req.user._id.toString(),
+              icon: req.user.profileImage || "/icon.png",
+            }
+          );
+
+          // Fallback to Web Push if FCM fails
+          if (!fcmResult.success) {
+            await sendPushToUser(
+              userId,
+              notificationTitle,
+              `${priorityEmoji} ${notificationBody}`,
+              req.user.profileImage || "/icon.png",
+              {
+                type: "task_assigned",
+                taskId: task._id.toString(),
+                taskTitle: title,
+                taskPriority: priority || "medium",
+                assignedBy: req.user.name,
+              }
+            );
+          }
+
+          console.log(
+            `📬 Task assignment notification sent to user: ${assignedUser.name}`
+          );
+        } catch (notifError) {
+          console.log(
+            "⚠️ Failed to send push notification:",
+            notifError.message
+          );
+        }
+      }
+    } catch (notifError) {
+      // Don't fail the task assignment if notification fails
+      console.error("⚠️ Failed to send task notification:", notifError.message);
+    }
+
     res.status(201).json(task);
   } catch (error) {
     console.error("❌ Error assigning task:", error);

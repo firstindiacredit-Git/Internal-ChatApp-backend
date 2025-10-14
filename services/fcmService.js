@@ -95,6 +95,13 @@ function initializeFirebase() {
       serviceAccount.private_key?.substring(0, 30) || "N/A"
     );
 
+    // Debug: Check if newlines are properly formatted
+    const lines = privateKey.split("\n");
+    console.log("   Private Key Lines:", lines.length);
+    console.log("   Line 1:", lines[0]);
+    console.log("   Line 2:", lines[1]?.substring(0, 50) || "N/A");
+    console.log("   Last Line:", lines[lines.length - 1]);
+
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });

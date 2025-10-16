@@ -457,4 +457,120 @@ router.post(
   }
 );
 
+// Pin a message in group
+router.post("/:id/pin-message", auth, async (req, res) => {
+  try {
+    const { messageId } = req.body;
+    const groupId = req.params.id;
+
+    const group = await Group.findById(groupId);
+    if (!group || !group.isActive) {
+      return res.status(404).json({ message: "Group not found" });
+    }
+
+    // Check if user is a member of the group
+    const isMember = group.members.some(
+      (member) => member.user.toString() === req.user._id.toString()
+    );
+
+    if (!isMember) {
+      return res
+        .status(403)
+        .json({ message: "Only group members can pin messages" });
+    }
+
+    // Check if message is already pinned
+    if (group.pinnedMessages.includes(messageId)) {
+      return res.status(400).json({ message: "Message is already pinned" });
+    }
+
+    // Add message to pinned messages
+    group.pinnedMessages.push(messageId);
+    await group.save();
+
+    res.json({
+      message: "Message pinned successfully",
+      pinnedMessages: group.pinnedMessages,
+    });
+  } catch (error) {
+    console.error("Pin message error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Unpin a message in group
+router.post("/:id/unpin-message", auth, async (req, res) => {
+  try {
+    const { messageId } = req.body;
+    const groupId = req.params.id;
+
+    const group = await Group.findById(groupId);
+    if (!group || !group.isActive) {
+      return res.status(404).json({ message: "Group not found" });
+    }
+
+    // Check if user is a member of the group
+    const isMember = group.members.some(
+      (member) => member.user.toString() === req.user._id.toString()
+    );
+
+    if (!isMember) {
+      return res
+        .status(403)
+        .json({ message: "Only group members can unpin messages" });
+    }
+
+    // Remove message from pinned messages
+    group.pinnedMessages = group.pinnedMessages.filter(
+      (id) => id.toString() !== messageId.toString()
+    );
+    await group.save();
+
+    res.json({
+      message: "Message unpinned successfully",
+      pinnedMessages: group.pinnedMessages,
+    });
+  } catch (error) {
+    console.error("Unpin message error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Get pinned messages for a group
+router.get("/:id/pinned-messages", auth, async (req, res) => {
+  try {
+    const groupId = req.params.id;
+
+    const group = await Group.findById(groupId).populate({
+      path: "pinnedMessages",
+      populate: {
+        path: "sender",
+        select: "name email profileImage",
+      },
+    });
+
+    if (!group || !group.isActive) {
+      return res.status(404).json({ message: "Group not found" });
+    }
+
+    // Check if user is a member of the group
+    const isMember = group.members.some(
+      (member) => member.user.toString() === req.user._id.toString()
+    );
+
+    if (!isMember) {
+      return res
+        .status(403)
+        .json({ message: "Only group members can view pinned messages" });
+    }
+
+    res.json({
+      pinnedMessages: group.pinnedMessages,
+    });
+  } catch (error) {
+    console.error("Get pinned messages error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 module.exports = router;

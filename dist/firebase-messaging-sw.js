@@ -222,26 +222,37 @@ self.addEventListener("notificationclick", (event) => {
   if (event.action === "answer") {
     // Answer call action
     event.notification.close();
+
+    const answerData = {
+      type: "answer-call",
+      data: notificationData,
+      timestamp: Date.now(),
+    };
+
     event.waitUntil(
       clients
         .matchAll({ type: "window", includeUncontrolled: true })
         .then((clientList) => {
+          console.log("[SW] Answer call - Found windows:", clientList.length);
+
           for (let client of clientList) {
-            if (
-              client.url.includes(self.registration.scope) &&
-              "focus" in client
-            ) {
-              client.postMessage({
-                type: "answer-call",
-                data: notificationData,
-              });
+            const clientUrl = new URL(client.url);
+            const scopeUrl = new URL(self.registration.scope);
+
+            // Match by origin
+            if (clientUrl.origin === scopeUrl.origin) {
+              console.log(
+                "[SW] Sending answer-call message to existing window"
+              );
+              client.postMessage(answerData);
               return client.focus();
             }
           }
+
           if (clients.openWindow) {
-            return clients.openWindow(
-              "/chat?action=answer-call&callId=" + notificationData.callId
-            );
+            console.log("[SW] Opening new window for answer-call");
+            const encodedData = btoa(JSON.stringify(answerData));
+            return clients.openWindow(`/chat?notificationData=${encodedData}`);
           }
         })
     );
@@ -290,29 +301,53 @@ self.addEventListener("notificationclick", (event) => {
     targetUrl = "/chat";
   }
 
+  // Store notification data for new window
+  const storageKey = `notification_data_${Date.now()}`;
+  const dataToStore = {
+    type: "notification-clicked",
+    data: notificationData,
+    timestamp: Date.now(),
+  };
+
   // Open or focus the app
   event.waitUntil(
     clients
       .matchAll({ type: "window", includeUncontrolled: true })
       .then((clientList) => {
+        console.log("[SW] Found client windows:", clientList.length);
+
         // Check if there's already a window open
         for (let client of clientList) {
-          if (
-            client.url.includes(self.registration.scope) &&
-            "focus" in client
-          ) {
+          const clientUrl = new URL(client.url);
+          const scopeUrl = new URL(self.registration.scope);
+
+          console.log(
+            "[SW] Checking client:",
+            clientUrl.origin,
+            scopeUrl.origin
+          );
+
+          // Match by origin
+          if (clientUrl.origin === scopeUrl.origin) {
+            console.log(
+              "[SW] Found matching window, sending message and focusing"
+            );
+
             // Send message to client with notification data
-            client.postMessage({
-              type: "notification-clicked",
-              data: notificationData,
-            });
+            client.postMessage(dataToStore);
+
             return client.focus();
           }
         }
 
-        // If no window is open, open a new one
+        // If no window is open, open a new one with data in URL
+        console.log("[SW] No matching window found, opening new window");
+
         if (clients.openWindow) {
-          return clients.openWindow(targetUrl);
+          // Store data in URL as base64 to pass to new window
+          const encodedData = btoa(JSON.stringify(dataToStore));
+          const urlWithData = `${targetUrl}?notificationData=${encodedData}`;
+          return clients.openWindow(urlWithData);
         }
       })
   );

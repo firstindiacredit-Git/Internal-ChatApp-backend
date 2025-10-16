@@ -501,6 +501,10 @@ io.on("connection", (socket) => {
             callerId: socket.userId,
             callerName: callerName,
             callerImage: socket.user?.profileImage || "/icon.png",
+            // Add fields that frontend expects
+            senderId: socket.userId,
+            senderName: callerName,
+            senderImage: socket.user?.profileImage || "/icon.png",
             icon: socket.user?.profileImage || "/icon.png",
           }
         )
@@ -517,6 +521,10 @@ io.on("connection", (socket) => {
                   callId: callId,
                   callerId: socket.userId,
                   callerName: callerName,
+                  // Add fields that frontend expects
+                  senderId: socket.userId,
+                  senderName: callerName,
+                  senderImage: socket.user?.profileImage || "/icon.png",
                 }
               );
             }
@@ -852,6 +860,10 @@ io.on("connection", (socket) => {
                   roomName: roomName,
                   initiatorId: socket.userId,
                   initiatorName: initiatorName,
+                  // Add fields that frontend expects
+                  senderId: socket.userId,
+                  senderName: initiatorName,
+                  senderImage: socket.user?.profileImage || "/icon.png",
                   icon: socket.user?.profileImage || "/icon.png",
                 }
               )
@@ -871,6 +883,10 @@ io.on("connection", (socket) => {
                         roomName: roomName,
                         initiatorId: socket.userId,
                         initiatorName: initiatorName,
+                        // Add fields that frontend expects
+                        senderId: socket.userId,
+                        senderName: initiatorName,
+                        senderImage: socket.user?.profileImage || "/icon.png",
                       }
                     );
                   }

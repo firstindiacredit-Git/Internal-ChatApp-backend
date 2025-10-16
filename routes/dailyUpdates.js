@@ -19,14 +19,36 @@ const upload = multer({
     fileSize: 100 * 1024 * 1024, // 100MB limit
   },
   fileFilter: (req, file, cb) => {
-    // Accept images and videos only
-    if (
-      file.mimetype.startsWith("image/") ||
-      file.mimetype.startsWith("video/")
-    ) {
+    // Accept images, videos, and documents
+    const allowedMimeTypes = [
+      "image/",
+      "video/",
+      "application/pdf",
+      "application/zip",
+      "application/x-zip-compressed",
+      "application/postscript", // .ps, .ai
+      "application/x-photoshop", // .psd
+      "application/vnd.corel-draw", // .cdr
+      "application/illustrator", // .ai
+      "image/vnd.adobe.photoshop", // .psd
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ];
+
+    const isAllowed = allowedMimeTypes.some(
+      (type) => file.mimetype.startsWith(type) || file.mimetype.includes(type)
+    );
+
+    if (isAllowed) {
       cb(null, true);
     } else {
-      cb(new Error("Only image and video files are allowed"));
+      cb(
+        new Error(
+          "File type not supported. Supported: images, videos, PDF, ZIP, PSD, AI, CDR, PS, DOC, XLS"
+        )
+      );
     }
   },
 });
@@ -122,15 +144,29 @@ router.post("/upload-media", auth, upload.single("file"), async (req, res) => {
 
     const file = req.file;
     const isVideo = file.mimetype.startsWith("video/");
+    const isImage = file.mimetype.startsWith("image/");
+
+    // Determine resource type for Cloudinary
+    let resourceType = "raw"; // default for documents
+    let fileType = "document";
+
+    if (isVideo) {
+      resourceType = "video";
+      fileType = "video";
+    } else if (isImage) {
+      resourceType = "image";
+      fileType = "image";
+    }
 
     // Upload to Cloudinary
     const uploadStream = cloudinary.uploader.upload_stream(
       {
-        resource_type: isVideo ? "video" : "image",
+        resource_type: resourceType,
         folder: "daily-updates",
-        transformation: isVideo
-          ? []
-          : [{ width: 1200, height: 1200, crop: "limit" }],
+        transformation:
+          resourceType === "image"
+            ? [{ width: 1200, height: 1200, crop: "limit" }]
+            : [],
       },
       (error, result) => {
         if (error) {
@@ -139,7 +175,7 @@ router.post("/upload-media", auth, upload.single("file"), async (req, res) => {
         }
 
         res.json({
-          type: isVideo ? "video" : "image",
+          type: fileType,
           url: result.secure_url,
           publicId: result.public_id,
           filename: file.originalname,

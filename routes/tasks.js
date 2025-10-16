@@ -446,10 +446,14 @@ router.get("/", auth, async (req, res) => {
 // Get a specific task by ID
 router.get("/:id", auth, async (req, res) => {
   try {
-    const task = await Task.findOne({
-      _id: req.params.id,
-      user: req.user._id,
-    });
+    // Admins can view any task, regular users can only view their own
+    let query = { _id: req.params.id };
+
+    if (req.user.role !== "admin" && req.user.role !== "superadmin") {
+      query.user = req.user._id;
+    }
+
+    const task = await Task.findOne(query);
 
     if (!task) {
       return res.status(404).json({ error: "Task not found" });
@@ -489,7 +493,7 @@ router.post("/", auth, async (req, res) => {
 });
 
 // Update an existing task
-router.put("/:id", auth, async (req, res) => {
+router.put("/:id/update", auth, async (req, res) => {
   try {
     const {
       title,
@@ -515,18 +519,21 @@ router.put("/:id", auth, async (req, res) => {
       updateData.progress = Math.min(100, Math.max(0, progress));
     }
 
-    const task = await Task.findOneAndUpdate(
-      { _id: req.params.id, user: req.user._id },
-      updateData,
-      { new: true }
-    );
+    // Admins can update any task, regular users can only update their own
+    let query = { _id: req.params.id };
+
+    if (req.user.role !== "admin" && req.user.role !== "superadmin") {
+      query.user = req.user._id;
+    }
+
+    const task = await Task.findOneAndUpdate(query, updateData, { new: true });
 
     if (!task) {
       return res.status(404).json({ error: "Task not found" });
     }
 
     console.log(
-      `✅ Task updated: ${task.title} - Progress: ${task.progress}% - Status: ${task.status}`
+      `✅ Task updated: ${task.title} - Progress: ${task.progress}% - Status: ${task.status} by ${req.user.name} (${req.user.role})`
     );
     res.json(task);
   } catch (error) {
@@ -536,18 +543,25 @@ router.put("/:id", auth, async (req, res) => {
 });
 
 // Delete a task
-router.delete("/:id", auth, async (req, res) => {
+router.delete("/:id/delete", auth, async (req, res) => {
   try {
-    const task = await Task.findOneAndDelete({
-      _id: req.params.id,
-      user: req.user._id,
-    });
+    // Admins can delete any task, regular users can only delete their own
+    let query = { _id: req.params.id };
+
+    if (req.user.role !== "admin" && req.user.role !== "superadmin") {
+      query.user = req.user._id;
+    }
+
+    const task = await Task.findOneAndDelete(query);
 
     if (!task) {
       return res.status(404).json({ error: "Task not found" });
     }
 
-    res.json({ message: "Task deleted successfully" });
+    console.log(
+      `✅ Task deleted: ${task.title} by ${req.user.name} (${req.user.role})`
+    );
+    res.json(task);
   } catch (error) {
     console.error("Error deleting task:", error);
     res.status(500).json({ error: "Server error" });

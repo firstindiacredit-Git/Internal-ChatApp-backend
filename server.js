@@ -662,6 +662,42 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle request to resend offer (when receiver joins from notification)
+  socket.on("call-request-offer", async (data) => {
+    try {
+      const { callId, receiverId } = data || {};
+      console.log(
+        `📞 Receiver ${receiverId} requesting offer for call:`,
+        callId
+      );
+
+      if (!callId) {
+        socket.emit("call-error", { error: "Call ID is required" });
+        return;
+      }
+
+      const call = await Call.findById(callId);
+      if (!call) {
+        socket.emit("call-error", { error: "Call not found" });
+        return;
+      }
+
+      // Notify the caller to resend the offer
+      const callerActive = activeUsers.get(call.caller.toString());
+      if (callerActive) {
+        console.log(`📞 Notifying caller ${call.caller} to resend offer`);
+        io.to(callerActive.socketId).emit("call-resend-offer", {
+          callId: call._id,
+          receiverId: call.receiver,
+          callType: call.callType,
+        });
+      }
+    } catch (error) {
+      console.error("Call request offer error:", error);
+      socket.emit("call-error", { error: "Failed to request offer" });
+    }
+  });
+
   socket.on("call-offer", async (data) => {
     try {
       const { callId, offer } = data || {};
